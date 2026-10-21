@@ -10,7 +10,7 @@ A visual parametric modeling node editor built specifically for **IngeTrazo**.
 
 ## 🚀 Key Features
 
-- **Grasshopper-Style Visual Programming**: Connect parametric nodes with Bezier wires, multi-wire connections (`Shift + drag`), wire cutting (`Ctrl + drag`), and live canvas evaluation.
+- **Visual Programming**: Connect parametric nodes with Bezier wires, multi-wire connections (`Shift + drag`), wire cutting (`Ctrl + drag`), and live canvas evaluation.
 - **Ribbon Shelf & Themed Icons**: Categorized tabbed shelf with invertable light/dark mode vector icons, hover tooltips, and collapsible toggle.
 - **Node Properties Inspector**: Live floating inspector panel to edit node titles, nicknames, and slider parameters (`min`, `max`, `step`, `decimals`) with instant canvas updates.
 - **Curve & Surface Points Extraction**: Extract sampled points, boundary loops, and vertices from 3D curves and NURBS/mesh surface boundaries.
