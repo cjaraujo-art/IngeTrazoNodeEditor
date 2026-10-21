@@ -1,100 +1,75 @@
-# IngeTrazo Node Editor (Parametric Visual Modeler)
+# IngeTrazo Parametric Node Editor
 
-A visual parametric node editor extension for **[IngeTrazo](https://github.com/ingelibre/ingetrazo)** (Python + PySide6 / Qt), bringing Grasshopper / Geometry Nodes style generative modeling into IngeTrazo.
+A visual parametric modeling node editor built specifically for **IngeTrazo**.
 
-<p align="center">
-  <a href="video/ing_node.mp4">
-    <img src="video/demo_preview.gif" alt="IngeTrazo Node Editor Live Demo" width="100%">
-  </a>
-  <br>
-  <em>📹 <b>Click the preview above to watch the full HD demo video</b> (<code>video/ing_node.mp4</code>)</em>
-</p>
+## 📺 Video Demo
 
----
+[![IngeTrazo Parametric Node Editor Demo](https://img.youtube.com/vi/unO9Fp8WYVg/maxresdefault.jpg)](https://www.youtube.com/watch?v=unO9Fp8WYVg)
 
-## 🎬 Video Demonstration
+▶️ **Watch on YouTube:** [IngeTrazo Parametric Node Editor Demo](https://www.youtube.com/watch?v=unO9Fp8WYVg)
 
-[![Watch Full Demo Video](video/thumbnail.png)](video/ing_node.mp4)
+## 🚀 Key Features
 
-> 💡 **[▶️ Click here to watch the full HD walkthrough (`video/ing_node.mp4`)](video/ing_node.mp4)**
->
-> **Demonstrated in the video:**
-> - **Real-Time Viewport Sync:** Interactive sliders instantly update 3D geometry in IngeTrazo's viewport with zero lag.
-> - **Point Grid Arrays:** Generating 2D coordinate matrices with `Point Grid (2D)` and dynamic crosshair markers.
-> - **Multi-Instance Solids:** Instantiating parametric solid cylinders at all grid points simultaneously.
-> - **Seamless Docking:** Native integration in IngeTrazo's navigation tabs with pop-out / floating window support.
+- **Grasshopper-Style Visual Programming**: Connect parametric nodes with Bezier wires, multi-wire connections (`Shift + drag`), wire cutting (`Ctrl + drag`), and live canvas evaluation.
+- **Ribbon Shelf & Themed Icons**: Categorized tabbed shelf with invertable light/dark mode vector icons, hover tooltips, and collapsible toggle.
+- **Node Properties Inspector**: Live floating inspector panel to edit node titles, nicknames, and slider parameters (`min`, `max`, `step`, `decimals`) with instant canvas updates.
+- **Curve & Surface Points Extraction**: Extract sampled points, boundary loops, and vertices from 3D curves and NURBS/mesh surface boundaries.
+- **Watertight Solid Geometry**: Solids, slabs, columns, beams, walls, parametric roofs, and monolithic stairs with automated vertex welding and hermetic volume calculation.
+- **Two-Tier Viewport Bridge**:
+  - **Live 60 FPS Sync**: Streams preview geometry via a 16 ms debounce timer into transient `_ingetrazo_node_preview` groups without polluting the undo stack.
+  - **Undo-Safe Baking**: Commits native IngeTrazo Groups, attaches BIM tags (`IfcWall`, `IfcColumn`, `IfcSlab`, `IfcStair`, etc.), embeds the node graph in `group.ext["node_graph"]`, and wraps the action in `SnapshotImport` (`Ctrl+Z` support).
+- **Drop-In Node Discovery**: Any `.py` file placed in `nodes/` using `@register_node` and `BaseNode` is automatically discovered, rendered with inline UI widgets, and vectorized with Grasshopper-style list broadcasting.
+- **Zero Extra Dependencies**: Strictly built on Python 3.11+ standard library and `PySide6` (Qt 6).
 
 ---
 
-## 🚀 Features
-
-- **Interactive Node Canvas:**
-  - Modern dark-themed UI matching IngeTrazo.
-  - Infinite dotted grid canvas with smooth panning (Middle drag or Alt+Left drag) and zooming (Mouse wheel).
-  - Smooth cubic Bezier wires with real-time port snapping and type-coded pins.
-  - Quick-search node palette via **Double-Click**, **Space**, or **Tab**.
-- **Real-Time Live Viewport Sync:**
-  - Dragging sliders on the canvas live-streams parametric geometry directly into IngeTrazo's 3D viewport.
-- **Parametric Node Catalog:**
-  - **Inputs & Inspection:** Number Slider (live float/int), Value Box, Toggle Switch, Vector XYZ, Text String, **Panel** (inspect and view any data with indexed list formatting `[0] ...`, or input multiline text and constants with scrollable monospace editor).
-  - **Math & Logic:** Add, Subtract, Multiply, Divide, Series/Range Generator, **Divide Range** (linear interpolation / linspace domain division with start, end, count, and step size output), **Expression Node** (safe AST evaluator supporting formulas like `sin(x)*cos(y)`, `sqrt(x*x + y*y)`, variable aliases `x/y/z`, `u/v/w`, `a/b/c`, list broadcasting, and on-node code widget).
-  - **List Operations:** **Cross Reference** (Cartesian product of two lists $A \times B$ pairing every element of A with every element of B for grid and coordinate synthesis).
-  - **Points & Vectors:** Construct Point (supports list inputs), Deconstruct Point, Vector Math, Distance, 2D Grid Array.
-  - **2D Profiles:** Line, Rectangle, Circle/Polygon, Polyline.
-  - **3D Solids:** Box (Cuboid), Cylinder, UV Sphere, Extrude Profile, Face from Points, **Mesh from Points** (generates quad and triangulated 3D mesh surfaces from structured point grids with U and V counts, periodic wrapping, and UV transposition).
-  - **Transforms:** Move / Translate, Rotate Z, Scale, Merge Meshes.
-  - **Scene Output:** `IngeTrazo Output` node with Live Sync toggle and Bake button.
-- **Bake to IngeTrazo:**
-  - Commits geometry into IngeTrazo native `Group` containers and layers (`shapes`, etc.) with full Ctrl+Z undo/redo support (`SnapshotImport`).
-- **Presets & Serialization:**
-  - Built-in presets: *Parametric Box*, *Gable Roof House*, *Spiral Staircase*, *Column Grid Array*, *Parametric Wave Surface*.
-  - Save and load node graphs as `.itgraph` (JSON).
-
----
-
-## 📥 Installation
-
-IngeTrazo automatically discovers plugins in your user plugins directory:
+## 📁 Project Structure
 
 ```
-%APPDATA%\ingetrazo\plugins\
+node_editor/
+├── __init__.py              # IngeTrazo ExtensionApp entry point & Scene/Mesh bridge
+├── core_types.py            # Socket types, Vec3, CurveData, watertight MeshData kernel
+├── node_base.py             # BaseNode class, @register_node decorator, auto-broadcasting
+├── engine.py                # DAG topological sort, dirty-cache evaluator, JSON serializer
+├── ui_canvas.py             # Ribbon shelf, Node Properties inspector, QGraphics canvas
+├── icons/                   # Theme icon assets
+│   ├── dark/                # Dark theme node icons
+│   └── light/               # Light theme inverted node icons
+├── nodes/
+│   ├── __init__.py          # Dynamic auto-loader & hot-reloader for all node modules
+│   ├── builtin_nodes.py     # Math, vectors, logic, panels, value lists, BIM Output
+│   ├── arch_nodes.py        # Walls, columns, slabs, openings, parametric arch elements
+│   ├── curve_nodes.py       # Lines, arcs, circles, splines, curve points extraction
+│   ├── roof_node.py         # Parametric hip, gable, and shed roofs
+│   ├── stair_node.py        # Monolithic concrete stairs and landings
+│   ├── transform_nodes.py   # Move, rotate, scale, mirror, polar array, grid array
+│   ├── image_nodes.py       # Heightmaps, displacement meshes, image samplers
+│   ├── material_nodes.py    # Colors, shaders, and visual preview materials
+│   ├── scene_nodes.py       # Scene reference, object picking, and bake conduits
+│   └── _node_template.py    # Copy-paste template & AI system prompt
+└── tests/
+    └── test_nodes.py        # Automated test suite (geometry, DAG, broadcast, UI)
 ```
 
-1. Copy the `node_editor` folder to:
-   ```
-   C:\Users\<YourUser>\AppData\Roaming\ingetrazo\plugins\node_editor
-   ```
-2. Start or restart **IngeTrazo**.
-3. Go to the menu:
-   - **Extensions** ▸ **Node Editor** ▸ **Open Node Editor…** (or press **Ctrl+Shift+N**).
-
 ---
 
-## ⌨️ Controls & Shortcuts
+## 🛠️ Testing & Running
 
-| Action | Shortcut / Mouse |
-|:--|:--|
-| **Open Node Search** | `Space`, `Tab`, or Double-Click empty canvas |
-| **Pan Canvas** | Middle Mouse Drag or `Alt` + Left Click Drag |
-| **Zoom Canvas** | Mouse Wheel |
-| **Connect Ports** | Click & drag from an output socket to an input socket |
-| **Delete Selected Nodes** | `Delete` or `Backspace` |
-| **Evaluate Graph** | `F5` or click **⚡ Evaluate** |
-| **Toggle Live Sync** | Checkbox **🔴 Live Sync** |
-| **Bake to Scene** | Click **🥐 Bake to IngeTrazo** |
+### Standalone Mode
+You can launch the Node Editor standalone for development:
+```bash
+python __init__.py
+```
 
----
+### Run Tests
+```bash
+python -m unittest tests/test_nodes.py
+```
 
-## 📚 Developing Custom Nodes & AI Guide
+### Installing in IngeTrazo
+Copy the repository contents into your IngeTrazo plugins folder:
+- **Windows**: `%APPDATA%\ingetrazo\plugins\ingetrazo_nodes\` (or `node_editor`)
+- **Linux**: `~/.local/share/ingetrazo/plugins/ingetrazo_nodes/`
+- **macOS**: `~/Library/Application Support/ingetrazo/plugins/ingetrazo_nodes/`
 
-Looking to author your own nodes or configure AI agents to work on the codebase? Check out the **[`tutorial/`](tutorial/)** directory:
-
-- **[`tutorial/node_template.py`](tutorial/node_template.py)**: Copy-pasteable boilerplate templates for math processors, 3D geometry/mesh creators, and list-aware nodes.
-- **[`tutorial/create_simple_node.md`](tutorial/create_simple_node.md)**: A complete, beginner-friendly walkthrough on building a custom parametric node from scratch.
-- **[`tutorial/ai_agent_guide.md`](tutorial/ai_agent_guide.md)**: Architectural invariants, performance gates (120 FPS GPU streaming vs CAD bake), and rules for AI assistants (Antigravity, Cursor, Copilot).
-
----
-
-## 📄 License
-
-Licensed under the [GNU General Public License v3.0 (GPL-3.0)](LICENSE), matching IngeTrazo's GPL-3.0 license.
+Open IngeTrazo and press `Ctrl+Shift+N` or go to **Extensions ▸ Parametric Node Editor...**.

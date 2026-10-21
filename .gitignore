@@ -1,4 +1,7 @@
 __pycache__/
 *.pyc
 *.zip
-
+!node_editor.zip
+target/
+**/target/
+*.pdb

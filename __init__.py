@@ -1,92 +1,754 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Copyright (C) 2026 IngeTrazo Node Editor contributors.
-"""IngeTrazo Node Editor — Visual Parametric Modeling Extension for IngeTrazo.
+"""IngeTrazo Parametric Node Editor Extension Entry Point."""
 
-Features:
-- Dockable directly in IngeTrazo's side panel tray alongside Properties, BIM, Levels.
-- One-click 'Pop Out / Float' into a dedicated multi-monitor window.
-- Visual node graph with interactive parameter sliders (Grasshopper / Geometry Nodes style).
-- Generative 3D parametric solids (Boxes, Cylinders, Spheres, Extrusions, Curves).
-- Real-time live viewport synchronization into IngeTrazo 3D scenes.
-- Direct baking to native IngeTrazo groups, layers, and materials with full undo/redo history.
-- Save and load node graphs (.itgraph).
-"""
 from __future__ import annotations
-
-import sys
-import logging
-from typing import Optional, Any
+import inspect
 from pathlib import Path
+import sys
+from typing import Any, List, Optional
 
+# Ensure package directory is on sys.path
 _pkg_dir = str(Path(__file__).resolve().parent)
 if _pkg_dir not in sys.path:
     sys.path.insert(0, _pkg_dir)
 
+# Import submodules flexibly
+try:
+    from . import core_types
+    from . import node_base
+    from . import engine
+    from . import ui_canvas
+    from . import nodes
+except (ImportError, ValueError):
+    import core_types
+    import node_base
+    import engine
+    import ui_canvas
+    import nodes
+
+# Alias modules in sys.modules so all imports inside node files and UI match
+sys.modules["core_types"] = core_types
+sys.modules["node_base"] = node_base
+sys.modules["engine"] = engine
+sys.modules["ui_canvas"] = ui_canvas
+sys.modules["nodes"] = nodes
+
+_pkg_name = __name__
+if _pkg_name:
+    sys.modules[f"{_pkg_name}.core_types"] = core_types
+    sys.modules[f"{_pkg_name}.node_base"] = node_base
+    sys.modules[f"{_pkg_name}.engine"] = engine
+    sys.modules[f"{_pkg_name}.ui_canvas"] = ui_canvas
+    sys.modules[f"{_pkg_name}.nodes"] = nodes
+
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QVector3D
+from PySide6.QtWidgets import (
+    QApplication, QDialog, QHBoxLayout, QMessageBox,
+    QPushButton, QVBoxLayout, QWidget,
+)
+
+try:
+    from .core_types import MeshData, Vec3
+    from .engine import GraphEngine
+    from .nodes import discover_nodes
+    from .ui_canvas import NodeEditorWidget
+except (ImportError, ValueError):
+    from core_types import MeshData, Vec3
+    from engine import GraphEngine
+    from nodes import discover_nodes
+    from ui_canvas import NodeEditorWidget
+
+# Immediately discover all node types on module load
+try:
+    discover_nodes(reload_modules=False)
+except Exception:
+    pass
+
+PLUGIN = {
+    "name": "IngeTrazo Parametric Node Editor",
+    "version": "1.1.0",
+    "author": "Community",
+    "description": "Visual parametric node editor with Blender-style sliders, live viewport sync, and BIM tagging.",
+}
+
+PREVIEW_TAG = "_ingetrazo_node_preview"
+
+
+def _populate_ingetrazo_mesh(target_mesh: Any, mesh_data: MeshData, scene: Optional[Any] = None) -> None:
+    """
+    Writes a watertight `MeshData` into an IngeTrazo `core.mesh.Mesh` instance.
+    Uses high-speed `add_faces_bulk` (leveraging the `ingetrazo_core` Rust kernel and NumPy)
+    when available, with graceful fallback to individual face loops.
+    Sets per-face `attrs["mat"]`, `attrs["color"]`, and `attrs["opacity"]`,
+    and registers named materials in `scene.materials` for full BIM and rendering parity.
+    """
+    # -------------------------------------------------------------------------
+    # 1. High-Performance Bulk Bridge (Rust / ingetrazo_core / NumPy)
+    # -------------------------------------------------------------------------
+    if hasattr(target_mesh, "add_faces_bulk") and len(mesh_data.faces) > 8:
+        try:
+            import numpy as np
+            v_arr = np.array(mesh_data.vertices, dtype=np.float32)
+            corner_indices: List[int] = []
+            ring_sizes: List[int] = []
+            attrs_list: List[Optional[Dict[str, Any]]] = []
+            valid_face_count = 0
+
+            for f_idx, f in enumerate(mesh_data.faces):
+                if len(f) >= 3 and all(0 <= idx < len(v_arr) for idx in f):
+                    corner_indices.extend(f)
+                    ring_sizes.append(len(f))
+                    valid_face_count += 1
+
+                    mat_name = (
+                        mesh_data.face_materials[f_idx]
+                        if f_idx < len(mesh_data.face_materials) and mesh_data.face_materials[f_idx]
+                        else mesh_data.material_name
+                    )
+                    col = (
+                        mesh_data.face_colors[f_idx]
+                        if f_idx < len(mesh_data.face_colors) and mesh_data.face_colors[f_idx] is not None
+                        else mesh_data.color
+                    )
+                    op = (
+                        mesh_data.face_opacities[f_idx]
+                        if f_idx < len(mesh_data.face_opacities) and mesh_data.face_opacities[f_idx] is not None
+                        else mesh_data.opacity
+                    )
+                    f_attr: Dict[str, Any] = {}
+                    if mat_name:
+                        f_attr["mat"] = mat_name
+                    if col is not None:
+                        f_attr["color"] = tuple(col)
+                    if op is not None:
+                        f_attr["opacity"] = float(op)
+                    attrs_list.append(f_attr if f_attr else None)
+
+                    if scene is not None and hasattr(scene, "materials") and isinstance(scene.materials, dict):
+                        if mat_name and mat_name not in scene.materials:
+                            try:
+                                from core.materials import Material
+                                scene.materials[mat_name] = Material(
+                                    name=mat_name,
+                                    color=tuple(col) if col else None,
+                                    opacity=float(op) if op is not None else None,
+                                )
+                            except Exception:
+                                scene.materials[mat_name] = {
+                                    "name": mat_name,
+                                    "color": tuple(col) if col else None,
+                                    "opacity": float(op) if op is not None else None,
+                                }
+
+            if valid_face_count > 0:
+                pos = v_arr[corner_indices]
+                r_sizes = np.array(ring_sizes, dtype=np.int64)
+                f_counts = np.ones(valid_face_count, dtype=np.int64)
+                target_mesh.add_faces_bulk(pos, r_sizes, f_counts, attrs=attrs_list)
+                return
+        except Exception:
+            pass  # Fall back to standard individual face loop
+
+    # -------------------------------------------------------------------------
+    # 2. Standard Shared-Vertex Fallback Loop
+    # -------------------------------------------------------------------------
+    qvecs: List[QVector3D] = [
+        QVector3D(float(x), float(y), float(z))
+        for (x, y, z) in mesh_data.vertices
+    ]
+
+    for f_idx, face_indices in enumerate(mesh_data.faces):
+        valid_qvecs = [qvecs[idx] for idx in face_indices if 0 <= idx < len(qvecs)]
+        if len(valid_qvecs) >= 3:
+            try:
+                face = target_mesh.add_face(valid_qvecs)
+                if face is not None and hasattr(face, "attrs") and isinstance(face.attrs, dict):
+                    mat_name = (
+                        mesh_data.face_materials[f_idx]
+                        if f_idx < len(mesh_data.face_materials) and mesh_data.face_materials[f_idx]
+                        else mesh_data.material_name
+                    )
+                    col = (
+                        mesh_data.face_colors[f_idx]
+                        if f_idx < len(mesh_data.face_colors) and mesh_data.face_colors[f_idx] is not None
+                        else mesh_data.color
+                    )
+                    op = (
+                        mesh_data.face_opacities[f_idx]
+                        if f_idx < len(mesh_data.face_opacities) and mesh_data.face_opacities[f_idx] is not None
+                        else mesh_data.opacity
+                    )
+                    if mat_name:
+                        face.attrs["mat"] = mat_name
+                    if col is not None:
+                        face.attrs["color"] = tuple(col)
+                    if op is not None:
+                        face.attrs["opacity"] = float(op)
+
+                    if scene is not None and hasattr(scene, "materials") and isinstance(scene.materials, dict):
+                        if mat_name and mat_name not in scene.materials:
+                            try:
+                                from core.materials import Material
+                                mat_obj = Material(
+                                    name=mat_name,
+                                    color=tuple(col) if col else None,
+                                    opacity=float(op) if op is not None else None,
+                                )
+                            except Exception:
+                                mat_obj = {
+                                    "name": mat_name,
+                                    "color": tuple(col) if col else None,
+                                    "opacity": float(op) if op is not None else None,
+                                }
+                            scene.materials[mat_name] = mat_obj
+            except Exception:
+                pass
+
+    for i0, i1 in mesh_data.edges:
+        if 0 <= i0 < len(qvecs) and 0 <= i1 < len(qvecs):
+            try:
+                target_mesh.add_edge(qvecs[i0], qvecs[i1])
+            except Exception:
+                pass
+
+
+def _make_ingetrazo_group(mesh_data: MeshData, graph_dict: dict, is_preview: bool = False, scene: Optional[Any] = None) -> Any:
+    """Creates a native IngeTrazo `Group` from `MeshData`, preserving BIM tags and `group.ext`."""
+    from core.mesh import Mesh
+    try:
+        from core.group import Group
+    except ImportError:
+        from core.scene import Group
+
+    m = Mesh()
+    _populate_ingetrazo_mesh(m, mesh_data, scene=scene)
+
+    name_str = mesh_data.name or "Parametric_Solid"
+
+    grp = None
+    for kwargs in (
+        {"mesh": m, "name": name_str},
+        {"name": name_str, "mesh": m},
+    ):
+        try:
+            grp = Group(**kwargs)
+            break
+        except TypeError:
+            continue
+
+    if grp is None:
+        try:
+            grp = Group(m, name_str)
+        except TypeError:
+            try:
+                grp = Group(name_str)
+                grp.mesh = m
+            except TypeError:
+                grp = Group()
+                grp.name = name_str
+                grp.mesh = m
+
+    # Set container material (used by IngeTrazo viewport and effective_material)
+    grp_mat = {}
+    if mesh_data.material_name:
+        grp_mat["mat"] = mesh_data.material_name
+    if mesh_data.color is not None:
+        grp_mat["color"] = [float(c) for c in mesh_data.color]
+    if mesh_data.opacity is not None:
+        grp_mat["opacity"] = float(mesh_data.opacity)
+    if grp_mat:
+        grp.material = grp_mat
+
+    # Ensure mesh dirty flags are set for OpenGL chunk re-triangulation and shaders
+    m._chunk_dirty = True
+    m._attrs_dirty = True
+    m._mut_serial = getattr(m, "_mut_serial", 0) + 1
+
+    if mesh_data.ifc_class:
+        grp.ifc = {"class": mesh_data.ifc_class, "name": name_str}
+        if hasattr(grp, "ifc_class"):
+            grp.ifc_class = mesh_data.ifc_class
+
+    if not hasattr(grp, "ext") or not isinstance(grp.ext, dict):
+        try:
+            grp.ext = {}
+        except Exception:
+            pass
+
+    if hasattr(grp, "ext") and isinstance(grp.ext, dict):
+        if is_preview:
+            grp.ext[PREVIEW_TAG] = True
+        else:
+            grp.ext["node_graph"] = graph_dict
+
+    for method_name in ("invalidate", "update_bounds", "rebuild_bounds"):
+        fn = getattr(grp, method_name, None)
+        if callable(fn):
+            try:
+                fn()
+            except Exception:
+                pass
+
+    return grp
+
+
+class IngeTrazoSceneBridge:
+    """Bridges GraphEngine outputs into IngeTrazo's live Scene, Viewport, and History."""
+
+    def __init__(self, app: Any, engine: GraphEngine) -> None:
+        self.app = app
+        self.engine = engine
+        self.live_sync: bool = True
+        self.last_error: Optional[str] = None
+        self.engine.on_evaluated = self._on_graph_evaluated
+
+    @property
+    def scene(self) -> Any:
+        sc = getattr(self.app, "scene", None)
+        if sc is None and hasattr(self.app, "window"):
+            sc = getattr(self.app.window, "scene", None)
+        return sc
+
+    @property
+    def viewport(self) -> Any:
+        vp = getattr(self.app, "viewport", None)
+        if vp is None and hasattr(self.app, "window"):
+            vp = getattr(self.app.window, "viewport", None)
+        return vp
+
+    def _bump_viewport(self) -> None:
+        """Notifies IngeTrazo's OpenGL renderer that scene geometry changed."""
+        sc = self.scene
+        if sc is not None:
+            if hasattr(sc, "version"):
+                sc.version += 1
+            for fn_name in ("invalidate", "mark_dirty"):
+                fn = getattr(sc, fn_name, None)
+                if callable(fn):
+                    try:
+                        fn()
+                    except Exception:
+                        pass
+
+        if hasattr(self.app, "notify_scene_changed"):
+            try:
+                self.app.notify_scene_changed()
+            except Exception:
+                pass
+
+        vp = self.viewport
+        if vp is not None:
+            for fn_name in ("invalidate_buffers", "mark_dirty", "update"):
+                fn = getattr(vp, fn_name, None)
+                if callable(fn):
+                    try:
+                        fn()
+                    except Exception:
+                        pass
+
+    def clear_preview(self, refresh: bool = True) -> None:
+        """Removes transient live-preview groups from `scene.groups`."""
+        sc = self.scene
+        if sc is None or not hasattr(sc, "groups"):
+            return
+        before = len(sc.groups)
+        sc.groups[:] = [
+            g for g in sc.groups
+            if not (hasattr(g, "ext") and isinstance(g.ext, dict) and g.ext.get(PREVIEW_TAG))
+        ]
+        if refresh and len(sc.groups) != before:
+            self._bump_viewport()
+
+    def set_live_sync(self, enabled: bool) -> None:
+        self.live_sync = bool(enabled)
+        if not self.live_sync:
+            self.clear_preview(refresh=True)
+        else:
+            self.engine.evaluate()
+
+    def _on_graph_evaluated(
+        self,
+        meshes: List[MeshData],
+        points: List[Vec3],
+        eval_ms: float,
+    ) -> None:
+        """Streams transient preview geometry into IngeTrazo's viewport at 60 FPS."""
+        self.last_error = None
+        if not self.live_sync or self.scene is None:
+            return
+
+        self.clear_preview(refresh=False)
+        graph_dict = self.engine.to_dict()
+
+        try:
+            for mdata in meshes:
+                if not mdata.vertices and not mdata.edges:
+                    continue
+                preview_data = mdata.copy()
+                preview_data.name = f"[Preview] {mdata.name}"
+                grp = _make_ingetrazo_group(preview_data, graph_dict, is_preview=True, scene=self.scene)
+                self.scene.groups.append(grp)
+
+            # Render preview points as 3D crosshairs inside a single preview group
+            if points:
+                pt_mesh = MeshData(name="[Preview] Points")
+                arm = 0.08
+                for p in points:
+                    base = len(pt_mesh.vertices)
+                    pt_mesh.vertices.extend([
+                        (p.x - arm, p.y, p.z), (p.x + arm, p.y, p.z),
+                        (p.x, p.y - arm, p.z), (p.x, p.y + arm, p.z),
+                        (p.x, p.y, p.z - arm), (p.x, p.y, p.z + arm),
+                    ])
+                    pt_mesh.edges.extend([(base, base + 1), (base + 2, base + 3), (base + 4, base + 5)])
+                grp_pts = _make_ingetrazo_group(pt_mesh, graph_dict, is_preview=True, scene=self.scene)
+                self.scene.groups.append(grp_pts)
+
+            self._bump_viewport()
+        except Exception as exc:
+            self.last_error = f"{type(exc).__name__}: {exc}"
+
+    def bake_to_scene(self, specific_node_id: Optional[str] = None) -> int:
+        """
+        Commits current node outputs as permanent, watertight IngeTrazo Groups.
+        Supports both `SnapshotImport(callable)` and manual scene commit with Undo.
+        """
+        sc = self.scene
+        if sc is None or not hasattr(sc, "groups"):
+            return 0
+
+        self.clear_preview(refresh=False)
+        meshes = self.engine.collect_bake_outputs(specific_node_id=specific_node_id)
+        valid_meshes = [m for m in meshes if m.vertices or m.edges]
+        if not valid_meshes:
+            self._bump_viewport()
+            return 0
+
+        graph_dict = self.engine.to_dict()
+        baked_count = 0
+
+        def _do_commit(target_scene: Any) -> None:
+            nonlocal baked_count
+            for mdata in valid_meshes:
+                grp = _make_ingetrazo_group(mdata, graph_dict, is_preview=False, scene=target_scene)
+                target_scene.groups.append(grp)
+                baked_count += 1
+
+        history = getattr(self.app, "history", None) or getattr(sc, "history", None)
+        committed = False
+
+        if history is not None:
+            try:
+                from core.history import SnapshotImport
+                sig = inspect.signature(SnapshotImport.__init__)
+                # IngeTrazo's SnapshotImport(fn) takes a single callable `lambda s: ...`
+                if len(sig.parameters) <= 2:
+                    cmd = SnapshotImport(_do_commit)
+                    if hasattr(history, "execute"):
+                        history.execute(cmd, sc)
+                        committed = True
+                    elif hasattr(history, "push"):
+                        _do_commit(sc)
+                        history.push(cmd)
+                        committed = True
+                else:
+                    snap = SnapshotImport(sc, "Bake Parametric Node Graph")
+                    _do_commit(sc)
+                    if hasattr(snap, "finish"):
+                        snap.finish()
+                    if hasattr(history, "push"):
+                        history.push(snap)
+                    committed = True
+            except Exception:
+                committed = False
+
+        if not committed:
+            _do_commit(sc)
+
+        self._bump_viewport()
+        return baked_count
+
+    def load_graph_from_selected_group(self) -> Optional[dict]:
+        """Extracts embedded `group.ext["node_graph"]` from the selected Group in IngeTrazo."""
+        sc = self.scene
+        if sc is None:
+            return None
+
+        candidates: List[Any] = []
+        for attr in ("selected_group", "active_group"):
+            g = getattr(sc, attr, None)
+            if g is not None:
+                candidates.append(g)
+        for attr in ("selected_groups", "selection"):
+            sel = getattr(sc, attr, None)
+            if isinstance(sel, (list, set, tuple)):
+                candidates.extend(sel)
+
+        if not candidates and hasattr(sc, "groups"):
+            candidates = [g for g in sc.groups if getattr(g, "selected", False)]
+
+        for grp in candidates:
+            ext = getattr(grp, "ext", None)
+            if isinstance(ext, dict) and "node_graph" in ext:
+                return ext["node_graph"]
+        return None
+
+
+class NodeEditorDialog(QDialog):
+    """Non-modal floating window hosting the Parametric Node Editor inside IngeTrazo."""
+
+    def __init__(self, app: Any, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent or getattr(app, "window", None))
+        self.app = app
+        self.setWindowTitle("IngeTrazo — Parametric Node Editor")
+        self.resize(1060, 660)
+        self.setWindowFlags(
+            Qt.WindowType.Window
+            | Qt.WindowType.WindowMinimizeButtonHint
+            | Qt.WindowType.WindowMaximizeButtonHint
+            | Qt.WindowType.WindowCloseButtonHint
+        )
+
+        discover_nodes(reload_modules=False)
+
+        self.engine = GraphEngine()
+        self.bridge = IngeTrazoSceneBridge(app, self.engine)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        self.editor_widget = NodeEditorWidget(
+            engine=self.engine,
+            on_bake=self._handle_bake,
+            on_live_toggled=self.bridge.set_live_sync,
+            get_bridge_error=lambda: self.bridge.last_error,
+            get_app=lambda: self.app,
+            parent=self,
+        )
+
+        footer = QWidget()
+        footer.setStyleSheet("background: #181a1f; color: #abb2bf; border-top: 1px solid #2c313a;")
+        f_layout = QHBoxLayout(footer)
+        f_layout.setContentsMargins(8, 4, 8, 4)
+        btn_load_sel = QPushButton("📥 Load Graph from Selected Scene Group")
+        btn_load_sel.setStyleSheet("background: #2c313c; color: #e5c07b; padding: 3px 8px;")
+        btn_load_sel.clicked.connect(self._handle_load_from_selection)
+        f_layout.addWidget(btn_load_sel)
+        f_layout.addStretch(1)
+
+        layout.addWidget(self.editor_widget, stretch=1)
+        layout.addWidget(footer)
+
+    def _handle_bake(self, specific_node_id: Any = None) -> None:
+        target_id = specific_node_id if isinstance(specific_node_id, str) else None
+        count = self.bridge.bake_to_scene(specific_node_id=target_id)
+        if count > 0:
+            self.editor_widget.lbl_status.setText(f"🥐 Baked {count} watertight solid(s) to IngeTrazo Scene!")
+        else:
+            err = self.bridge.last_error or "No valid geometry to bake."
+            self.editor_widget.lbl_status.setText(f"⚠️ {err}")
+
+    def _handle_load_from_selection(self) -> None:
+        graph_dict = self.bridge.load_graph_from_selected_group()
+        if graph_dict:
+            self.engine.load_dict(graph_dict)
+            self.editor_widget.scene.rebuild_from_engine()
+            self.editor_widget.lbl_status.setText("✅ Loaded node graph from selected Group!")
+        else:
+            QMessageBox.information(
+                self,
+                "No Embedded Graph Found",
+                "Select a Group in IngeTrazo that was previously baked by the Node Editor.",
+            )
+
+    def closeEvent(self, event) -> None:
+        self.bridge.clear_preview(refresh=True)
+        super().closeEvent(event)
+
+
+_ACTIVE_DIALOG: Optional[NodeEditorDialog] = None
+
+
+def open_node_editor(app: Any) -> None:
+    """Opens or brings to front the Parametric Node Editor (tab or window)."""
+    win = getattr(app, "_window", None) or getattr(app, "window", None)
+    dock = getattr(win, "_node_editor_dock", None)
+    if dock is not None:
+        if hasattr(win, "set_tray_shown"):
+            try:
+                win.set_tray_shown(dock, True)
+            except Exception:
+                pass
+        dock.show()
+        dock.raise_()
+        dock.activateWindow()
+        editor = getattr(win, "_node_editor_widget", None)
+        if editor:
+            editor.schedule_eval()
+        return
+
+    global _ACTIVE_DIALOG
+    if _ACTIVE_DIALOG is None:
+        _ACTIVE_DIALOG = NodeEditorDialog(app)
+    _ACTIVE_DIALOG.show()
+    _ACTIVE_DIALOG.raise_()
+    _ACTIVE_DIALOG.activateWindow()
+    _ACTIVE_DIALOG.editor_widget.schedule_eval()
+
+
+# ============================================================================
+# INGETRAZO EXTENSION CONTRACT (Tool SUBCLASS & setup(app) HOOK)
+# ============================================================================
 try:
     from tools.base import Tool
 except ImportError:
     class Tool:
         pass
 
-log = logging.getLogger("ingetrazo.plugins.node_editor")
-
 
 class NodeEditorTool(Tool):
-    """Extensions menu entry to bring the Node Editor dock panel to the front."""
-    name = "Node Editor"
+    """Extensions menu entry to bring the Node Editor tab to the front."""
+    name = "Parametric Node Editor"
     shortcut = "Ctrl+Shift+N"
-    description = "Open the visual parametric node editor for generative 3D modeling."
+    description = "Open the visual parametric node editor tab."
     uses_snap = False
 
     def on_activate(self, viewport) -> None:
-        window = viewport.window()
+        window = getattr(viewport, "window", None)
+        if callable(window):
+            window = window()
         dock = getattr(window, "_node_editor_dock", None)
         if dock is not None:
-            # Switch to the Node Editor tab in the side tray
             if hasattr(window, "set_tray_shown"):
-                window.set_tray_shown(dock, True)
+                try:
+                    window.set_tray_shown(dock, True)
+                except Exception:
+                    pass
             dock.show()
             dock.raise_()
+            dock.activateWindow()
+            editor = getattr(window, "_node_editor_widget", None)
+            if editor:
+                editor.schedule_eval()
         else:
-            # Fallback if opened before dock registration
-            panel = getattr(window, "_node_editor_panel", None)
-            if panel is not None:
-                panel.show()
-                panel.raise_()
+            app = getattr(window, "_extension_app_handle", None)
+            open_node_editor(app)
 
     def on_deactivate(self, viewport) -> None:
         pass
 
 
-def setup(app) -> None:
-    """Extension initialization called by IngeTrazo at startup. Registers the dock panel in the side tray."""
+def setup(app: Any) -> None:
+    """Extension initialization called by IngeTrazo's core.extensions loader."""
     try:
-        from .ui.window import NodeEditorWidget
+        discover_nodes(reload_modules=False)
 
-        # 1. Create dock panel widget in the side tray alongside Properties, BIM, Levels
-        editor_panel = NodeEditorWidget(app)
-        dock = app.add_panel("Node Editor", editor_panel)
-        if dock is not None:
-            editor_panel.set_dock_widget(dock)
-
-        # Store handles on the main window for quick access
-        win = getattr(app, "_window", None)
+        win = getattr(app, "_window", None) or getattr(app, "window", None)
         if win:
-            win._node_editor_dock = dock
-            win._node_editor_panel = editor_panel
             win._extension_app_handle = app
 
-        # 2. Add action in Extensions menu
-        def show_editor():
+        engine = GraphEngine()
+        bridge = IngeTrazoSceneBridge(app, engine)
+
+        def _handle_bake(specific_node_id: Any = None) -> None:
+            target_id = specific_node_id if isinstance(specific_node_id, str) else None
+            count = bridge.bake_to_scene(specific_node_id=target_id)
+            if count > 0:
+                editor_widget.lbl_status.setText(f"🥐 Baked {count} watertight solid(s) to IngeTrazo Scene!")
+            else:
+                err = bridge.last_error or "No valid geometry to bake."
+                editor_widget.lbl_status.setText(f"⚠️ {err}")
+
+        def _handle_load_from_selection() -> None:
+            graph_dict = bridge.load_graph_from_selected_group()
+            if graph_dict:
+                engine.load_dict(graph_dict)
+                editor_widget.scene.rebuild_from_engine()
+                editor_widget.lbl_status.setText("✅ Loaded node graph from selected Group!")
+            else:
+                from PySide6.QtWidgets import QMessageBox
+                QMessageBox.information(
+                    editor_widget,
+                    "No Embedded Graph Found",
+                    "Select a Group in IngeTrazo that was previously baked by the Node Editor.",
+                )
+
+        editor_widget = NodeEditorWidget(
+            engine=engine,
+            on_bake=_handle_bake,
+            on_live_toggled=bridge.set_live_sync,
+            get_bridge_error=lambda: bridge.last_error,
+            on_load_selection=_handle_load_from_selection,
+            get_app=lambda: app,
+        )
+
+        # Register as a dock tab in the side tray (beside Properties, BIM, Solid Inspector)
+        dock = None
+        if hasattr(app, "add_panel"):
+            dock = app.add_panel("Node Editor", editor_widget)
             if dock is not None:
-                app.show_panel(dock)
-                dock.raise_()
+                editor_widget.set_dock(dock)
 
-        sub = app.add_menu("Node Editor")
-        if sub is not None:
-            sub.addAction("Open Node Editor… (Ctrl+Shift+N)", show_editor)
+        if win:
+            win._node_editor_widget = editor_widget
+            win._node_editor_dock = dock
+            win._node_editor_bridge = bridge
 
-        log.info("IngeTrazo Node Editor dock panel registered in side tray successfully.")
+            # Ensure the tab is tabified with the side tray
+            if dock is not None:
+                from PySide6.QtCore import QTimer
+                def _join_tray():
+                    tray = getattr(win, "tray", None)
+                    if (tray is not None and not dock.isFloating() and not dock.isHidden()
+                            and not win.tabifiedDockWidgets(dock)
+                            and win.dockWidgetArea(dock) == win.dockWidgetArea(tray)):
+                        win.tabifyDockWidget(tray, dock)
+                QTimer.singleShot(0, _join_tray)
+
+        def show_editor():
+            open_node_editor(app)
+
+        if hasattr(app, "add_action"):
+            app.add_action(
+                "Parametric Node Editor...",
+                show_editor,
+                shortcut="Ctrl+Shift+N",
+            )
+        elif hasattr(app, "add_menu"):
+            sub = app.add_menu("Node Editor")
+            if sub is not None:
+                sub.addAction("Open Node Editor… (Ctrl+Shift+N)", show_editor)
 
     except Exception as ex:
-        log.error(f"Error during Node Editor setup: {ex}", exc_info=True)
+        import logging
+        logging.getLogger("ingetrazo.plugins").error(f"Error during Node Editor setup: {ex}", exc_info=True)
+
+
+def register(app: Any) -> None:
+    """IngeTrazo Extension entry point called when the plugin is enabled."""
+    setup(app)
+
+
+def unregister(app: Any) -> None:
+    """IngeTrazo Extension cleanup hook called when the plugin is disabled."""
+    global _ACTIVE_DIALOG
+    if _ACTIVE_DIALOG is not None:
+        _ACTIVE_DIALOG.bridge.clear_preview(refresh=True)
+        _ACTIVE_DIALOG.close()
+        _ACTIVE_DIALOG = None
+
+
+if __name__ == "__main__":
+    import sys
+
+    class _DummyApp:
+        scene = None
+        viewport = None
+        window = None
+
+    qapp = QApplication.instance() or QApplication(sys.argv)
+    dlg = NodeEditorDialog(_DummyApp())
+    dlg.show()
+    sys.exit(qapp.exec())

@@ -1,525 +1,453 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Core Node Graph engine, DAG solver, and serialization."""
+"""Directed Acyclic Graph (DAG) execution engine with dirty-flag caching."""
+
 from __future__ import annotations
-
-import enum
-import time
+from collections import deque
+from dataclasses import dataclass
 import json
-import uuid
-import copy
-import logging
-from typing import Dict, List, Optional, Any, Callable, Set
+import time
+import traceback
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
-log = logging.getLogger("ingetrazo.plugins.node_editor")
-
-
-class PortType(enum.Enum):
-    ANY = "any"
-    NUMBER = "number"
-    INTEGER = "integer"
-    BOOLEAN = "boolean"
-    STRING = "string"
-    VECTOR = "vector"
-    POINT = "point"
-    CURVE = "curve"
-    MESH = "mesh"
+try:
+    from .core_types import CurveData, MeshData, Vec3
+    from .node_base import BaseNode, NODE_REGISTRY
+except (ImportError, ValueError):
+    from core_types import CurveData, MeshData, Vec3
+    from node_base import BaseNode, NODE_REGISTRY
 
 
-# Color mapping for visual port types
-PORT_COLORS = {
-    PortType.ANY: "#d4d4d4",
-    PortType.NUMBER: "#4fc1ff",
-    PortType.INTEGER: "#569cd6",
-    PortType.BOOLEAN: "#c586c0",
-    PortType.STRING: "#ce9178",
-    PortType.VECTOR: "#4ec9b0",
-    PortType.POINT: "#6a9955",
-    PortType.CURVE: "#dcdcaa",
-    PortType.MESH: "#f28b25",
-}
+@dataclass(frozen=True)
+class Wire:
+    """Directed connection from `src_node.src_socket` -> `dst_node.dst_socket`."""
+    src_node: str
+    src_socket: str
+    dst_node: str
+    dst_socket: str
 
-
-class Port:
-    """An input or output connection pin on a node."""
-
-    def __init__(
-        self,
-        node: NodeBase,
-        name: str,
-        port_type: PortType = PortType.ANY,
-        is_input: bool = True,
-        default_value: Any = None,
-        description: str = ""
-    ):
-        self.node = node
-        self.name = name
-        self.original_name = name
-        self.port_type = port_type
-        self.is_input = is_input
-        self._default_value = default_value
-        self._value: Any = default_value
-        self.description = description
-        self.connections: List[Connection] = []
-
-    def serialize(self) -> dict:
-        def_val = None
-        if isinstance(self._default_value, (int, float, str, bool, list, dict)) or self._default_value is None:
-            def_val = self._default_value
+    def to_dict(self) -> Dict[str, str]:
         return {
-            "name": self.name,
-            "original_name": getattr(self, "original_name", self.name),
-            "type": self.port_type.value,
-            "default_value": def_val,
-            "description": self.description,
-        }
-
-    @property
-    def default_value(self) -> Any:
-        return self._default_value
-
-    @default_value.setter
-    def default_value(self, val: Any) -> None:
-        if self._value == self._default_value or self._value is None:
-            self._value = val
-        self._default_value = val
-
-    @property
-    def value(self) -> Any:
-        return self._value
-
-    @value.setter
-    def value(self, val: Any) -> None:
-        self._value = val
-
-    @property
-    def has_connection(self) -> bool:
-        return len(self.connections) > 0
-
-    def get_color(self) -> str:
-        return PORT_COLORS.get(self.port_type, "#d4d4d4")
-
-
-class Connection:
-    """A directed wire between an output port and an input port."""
-
-    def __init__(self, source_port: Port, target_port: Port):
-        self.id = str(uuid.uuid4())
-        self.source = source_port  # Output
-        self.target = target_port  # Input
-
-    def serialize(self) -> dict:
-        return {
-            "id": self.id,
-            "source_node": self.source.node.id,
-            "source_port": self.source.name,
-            "target_node": self.target.node.id,
-            "target_port": self.target.name
+            "src_node": self.src_node,
+            "src_socket": self.src_socket,
+            "dst_node": self.dst_node,
+            "dst_socket": self.dst_socket,
         }
 
 
-class NodeBase:
-    """Base class for all functional graph nodes."""
+class GraphEngine:
+    """
+    Professional DAG evaluator for IngeTrazo.
+    - Incremental dirty propagation: untouched upstream branches are O(1) cached.
+    - Cycle detection: refuses wires that would create a feedback loop.
+    - Fault isolation: captures node exceptions without breaking the UI or viewport.
+    """
 
-    name: str = "BaseNode"
-    category: str = "General"
-    description: str = ""
-    header_color: str = "#3b4252"
+    def __init__(self) -> None:
+        self.nodes: Dict[str, BaseNode] = {}
+        self.wires: List[Wire] = []
+        self.on_evaluated: Optional[Callable[[List[MeshData], List[Vec3], float], None]] = None
+        self.last_eval_ms: float = 0.0
 
-    def __init__(self, node_id: Optional[str] = None):
-        self.id = node_id or str(uuid.uuid4())
-        self.name: str = self.__class__.name
-        self.x: float = 0.0
-        self.y: float = 0.0
-        self.inputs: List[Port] = []
-        self.outputs: List[Port] = []
-        self.widget_values: Dict[str, Any] = {}
-        self._dirty: bool = True
-        self.error: Optional[str] = None
-        self.graph: Optional['NodeGraph'] = None
-        self.setup_ports()
+    # ------------------------------------------------------------------
+    # Graph Mutation API
+    # ------------------------------------------------------------------
+    def add_node(self, type_id: str, pos: Tuple[float, float] = (0.0, 0.0), node_id: Optional[str] = None) -> BaseNode:
+        cls = NODE_REGISTRY.get(type_id)
+        if cls is None:
+            raise KeyError(f"Unknown node type_id: '{type_id}'")
+        node = cls(node_id=node_id)
+        node.pos = pos
+        self.nodes[node.id] = node
+        return node
 
-    @property
-    def dirty(self) -> bool:
-        return self._dirty
+    def get_node(self, node_id: str) -> Optional[BaseNode]:
+        return self.nodes.get(node_id)
 
-    @dirty.setter
-    def dirty(self, val: bool) -> None:
-        self._dirty = val
-        if val and self.graph is not None:
-            self.graph.mark_dirty(self)
+    def remove_node(self, node_id: str) -> None:
+        if node_id not in self.nodes:
+            return
+        for w in self.wires:
+            if w.src_node == node_id:
+                self.mark_dirty(w.dst_node)
+        self.wires = [w for w in self.wires if w.src_node != node_id and w.dst_node != node_id]
+        del self.nodes[node_id]
 
-    def mark_dirty(self) -> None:
-        self._dirty = True
-        if self.graph is not None:
-            self.graph.mark_dirty(self)
+    def can_connect(self, src_node: str, src_socket: str, dst_node: str, dst_socket: str) -> bool:
+        if src_node == dst_node:
+            return False
+        s_node = self.nodes.get(src_node)
+        d_node = self.nodes.get(dst_node)
+        if not s_node or not d_node:
+            return False
+        if not s_node.get_output_spec(src_socket) or not d_node.get_input_spec(dst_socket):
+            return False
+        if self._is_reachable(dst_node, src_node):
+            return False
+        return True
 
-    def setup_ports(self) -> None:
-        """Override to add input and output ports."""
-        pass
-
-    def add_input(
+    def connect(
         self,
-        name: str,
-        port_type: PortType = PortType.ANY,
-        default_value: Any = None,
-        description: str = ""
-    ) -> Port:
-        p = Port(self, name, port_type, is_input=True, default_value=default_value, description=description)
-        self.inputs.append(p)
-        return p
+        src_node: str,
+        src_socket: str,
+        dst_node: str,
+        dst_socket: str,
+        replace_existing: bool = True,
+    ) -> Optional[Wire]:
+        if not self.can_connect(src_node, src_socket, dst_node, dst_socket):
+            return None
+        for w in self.wires:
+            if (
+                w.src_node == src_node
+                and w.src_socket == src_socket
+                and w.dst_node == dst_node
+                and w.dst_socket == dst_socket
+            ):
+                return w
+        if replace_existing:
+            self.wires = [
+                w for w in self.wires
+                if not (w.dst_node == dst_node and w.dst_socket == dst_socket)
+            ]
+        wire = Wire(src_node, src_socket, dst_node, dst_socket)
+        self.wires.append(wire)
+        self.mark_dirty(dst_node)
+        return wire
 
-    def add_output(
-        self,
-        name: str,
-        port_type: PortType = PortType.ANY,
-        description: str = ""
-    ) -> Port:
-        p = Port(self, name, port_type, is_input=False, default_value=None, description=description)
-        self.outputs.append(p)
-        return p
+    def disconnect(self, wire: Wire) -> None:
+        if wire in self.wires:
+            self.wires.remove(wire)
+            self.mark_dirty(wire.dst_node)
 
-    def get_input(self, index_or_name: Any, fallback: Any = None) -> Any:
-        port: Optional[Port] = None
-        if isinstance(index_or_name, int) and 0 <= index_or_name < len(self.inputs):
-            port = self.inputs[index_or_name]
-        elif isinstance(index_or_name, str):
-            for p in self.inputs:
-                if p.name == index_or_name:
-                    port = p
-                    break
-            if port is None:
-                for p in self.inputs:
-                    if getattr(p, "original_name", None) == index_or_name:
-                        port = p
-                        break
+    def update_node_param(self, node_id: str, input_id: str, value: Any) -> None:
+        node = self.nodes.get(node_id)
+        if not node:
+            return
+        node.set_param(input_id, value)
+        if node.is_dirty:
+            self.mark_dirty(node_id)
 
-        if port is None:
-            return fallback
-
-        if port.has_connection:
-            if len(port.connections) == 1:
-                src = port.connections[0].source
-                return src.value if src.value is not None else fallback
-            else:
-                merged = []
-                for c in port.connections:
-                    val = c.source.value
-                    if isinstance(val, (list, tuple)):
-                        merged.extend(val)
-                    elif val is not None:
-                        merged.append(val)
-                return merged if merged else fallback
-
-        # If disconnected, check widget value matching port name (exact or case-insensitive)
-        if port.name in self.widget_values:
-            return self.widget_values[port.name]
-        for k, v in self.widget_values.items():
-            if k.lower() == port.name.lower():
-                return v
-
-        if port.value is not None:
-            return port.value
-
-        return port.default_value if port.default_value is not None else fallback
-
-    def set_output(self, index_or_name: Any, value: Any) -> None:
-        if isinstance(index_or_name, int) and 0 <= index_or_name < len(self.outputs):
-            self.outputs[index_or_name].value = value
-        elif isinstance(index_or_name, str):
-            for p in self.outputs:
-                if p.name == index_or_name:
-                    p.value = value
-                    return
-            for p in self.outputs:
-                if getattr(p, "original_name", None) == index_or_name:
-                    p.value = value
-                    return
-
-    def compute(self, context: Optional[Dict[str, Any]] = None) -> None:
-        """Core execution logic. Subclasses must implement."""
-        pass
-
-    def serialize(self) -> dict:
-        clean_widgets = {}
-        for k, v in self.widget_values.items():
-            if str(k).startswith("_"):
-                continue
-            if isinstance(v, (int, float, str, bool)) or v is None:
-                clean_widgets[k] = v
-            elif isinstance(v, (list, tuple)):
-                try:
-                    clean_widgets[k] = [
-                        x if isinstance(x, (int, float, str, bool)) or x is None
-                        else (float(x) if hasattr(x, "__float__") else str(x))
-                        for x in v
-                    ]
-                except Exception:
-                    pass
-            elif isinstance(v, dict):
-                try:
-                    clean_widgets[k] = {
-                        str(dk): dv for dk, dv in v.items()
-                        if not str(dk).startswith("_") and (isinstance(dv, (int, float, str, bool)) or dv is None)
-                    }
-                except Exception:
-                    pass
-            elif hasattr(v, "item"):
-                try:
-                    clean_widgets[k] = v.item()
-                except Exception:
-                    pass
-            elif hasattr(v, "__dict__") or "QImage" in type(v).__name__ or "QPixmap" in type(v).__name__:
-                continue
-            else:
-                try:
-                    clean_widgets[k] = str(v)
-                except Exception:
-                    pass
-
-        return {
-            "id": self.id,
-            "type": self.__class__.__name__,
-            "name": self.name,
-            "x": self.x,
-            "y": self.y,
-            "inputs": [p.serialize() for p in self.inputs],
-            "outputs": [p.serialize() for p in self.outputs],
-            "widgets": clean_widgets
-        }
-
-    def deserialize(self, data: dict) -> None:
-        if "name" in data:
-            self.name = str(data["name"])
-        self.x = data.get("x", 0.0)
-        self.y = data.get("y", 0.0)
-        self.widget_values.update(data.get("widgets", {}))
-
-        if "inputs" in data:
-            new_inputs: List[Port] = []
-            for pdata in data["inputs"]:
-                ptype_str = pdata.get("type", "any")
-                try:
-                    ptype = PortType(ptype_str)
-                except Exception:
-                    ptype = PortType.ANY
-                p = Port(
-                    node=self,
-                    name=pdata.get("name", "in"),
-                    port_type=ptype,
-                    is_input=True,
-                    default_value=pdata.get("default_value"),
-                    description=pdata.get("description", "")
-                )
-                p.original_name = pdata.get("original_name", p.name)
-                new_inputs.append(p)
-            self.inputs = new_inputs
-        elif hasattr(self, "sync_dynamic_ports"):
-            self.sync_dynamic_ports()
-
-        if "outputs" in data:
-            new_outputs: List[Port] = []
-            for pdata in data["outputs"]:
-                ptype_str = pdata.get("type", "any")
-                try:
-                    ptype = PortType(ptype_str)
-                except Exception:
-                    ptype = PortType.ANY
-                p = Port(
-                    node=self,
-                    name=pdata.get("name", "out"),
-                    port_type=ptype,
-                    is_input=False,
-                    default_value=pdata.get("default_value"),
-                    description=pdata.get("description", "")
-                )
-                p.original_name = pdata.get("original_name", p.name)
-                new_outputs.append(p)
-            self.outputs = new_outputs
-
-
-class NodeGraph:
-    """Container and solver for nodes and connections."""
-
-    def __init__(self):
-        self.nodes: List[NodeBase] = []
-        self.connections: List[Connection] = []
-        self.listeners: List[Callable[[], None]] = []
-        self.is_evaluating: bool = False
-
-    def mark_dirty(self, start_node: NodeBase) -> None:
-        """Mark start_node and all its downstream dependent nodes as dirty."""
-        visited = set()
-        queue = [start_node]
+    def mark_dirty(self, start_node_id: str) -> None:
+        queue = deque([start_node_id])
+        visited: Set[str] = set()
         while queue:
-            curr = queue.pop(0)
+            curr = queue.popleft()
+            if curr in visited or curr not in self.nodes:
+                continue
+            visited.add(curr)
+            self.nodes[curr].is_dirty = True
+            for w in self.wires:
+                if w.src_node == curr:
+                    queue.append(w.dst_node)
+
+    # ------------------------------------------------------------------
+    # Topological Sort & Evaluation
+    # ------------------------------------------------------------------
+    def _is_reachable(self, start_id: str, target_id: str) -> bool:
+        queue = deque([start_id])
+        visited: Set[str] = set()
+        while queue:
+            curr = queue.popleft()
+            if curr == target_id:
+                return True
             if curr in visited:
                 continue
             visited.add(curr)
-            curr._dirty = True
-            for out_port in curr.outputs:
-                for conn in out_port.connections:
-                    target = conn.target.node
-                    if target not in visited:
-                        queue.append(target)
+            for w in self.wires:
+                if w.src_node == curr:
+                    queue.append(w.dst_node)
+        return False
 
-    def add_node(self, node: NodeBase) -> NodeBase:
-        if node not in self.nodes:
-            node.graph = self
-            node._dirty = True
-            self.nodes.append(node)
-            self.notify_changed()
-        return node
+    def topological_order(self) -> List[str]:
+        in_degree: Dict[str, int] = {nid: 0 for nid in self.nodes}
+        adj: Dict[str, List[str]] = {nid: [] for nid in self.nodes}
+        for w in self.wires:
+            if w.src_node in self.nodes and w.dst_node in self.nodes:
+                adj[w.src_node].append(w.dst_node)
+                in_degree[w.dst_node] += 1
 
-    def remove_node(self, node: NodeBase) -> None:
-        if node in self.nodes:
-            # Disconnect all wires attached to this node
-            for conn in list(self.connections):
-                if conn.source.node == node or conn.target.node == node:
-                    self.disconnect(conn.source, conn.target)
-            self.nodes.remove(node)
-            node.graph = None
-            self.notify_changed()
-
-    def connect(self, source_port: Port, target_port: Port, append: bool = False) -> Optional[Connection]:
-        if source_port.is_input or not target_port.is_input:
-            return None
-        if source_port.node == target_port.node:
-            return None  # No self-loops
-
-        # Prevent duplicate connection from the exact same source port
-        for existing in target_port.connections:
-            if existing.source == source_port:
-                return existing
-
-        if not append:
-            # Single connection per input port if not appending
-            for existing in list(target_port.connections):
-                self.disconnect(existing.source, existing.target)
-
-        conn = Connection(source_port, target_port)
-        source_port.connections.append(conn)
-        target_port.connections.append(conn)
-        self.connections.append(conn)
-        self.mark_dirty(target_port.node)
-        self.notify_changed()
-        return conn
-
-    def disconnect(self, source_port: Port, target_port: Port) -> None:
-        for conn in list(self.connections):
-            if conn.source == source_port and conn.target == target_port:
-                if conn in source_port.connections:
-                    source_port.connections.remove(conn)
-                if conn in target_port.connections:
-                    target_port.connections.remove(conn)
-                self.connections.remove(conn)
-                self.mark_dirty(target_port.node)
-                self.notify_changed()
-                break
-
-    def notify_changed(self) -> None:
-        for cb in self.listeners:
-            try:
-                cb()
-            except Exception as e:
-                log.error(f"Error in graph change listener: {e}")
-
-    def topological_sort(self) -> List[NodeBase]:
-        """Order nodes so that producers execute before consumers."""
-        in_degree: Dict[NodeBase, int] = {node: 0 for node in self.nodes}
-        adj: Dict[NodeBase, List[NodeBase]] = {node: [] for node in self.nodes}
-
-        for conn in self.connections:
-            src_node = conn.source.node
-            dst_node = conn.target.node
-            if src_node in adj and dst_node in in_degree:
-                adj[src_node].append(dst_node)
-                in_degree[dst_node] += 1
-
-        queue = [n for n, deg in in_degree.items() if deg == 0]
-        sorted_nodes: List[NodeBase] = []
-
+        queue = deque([nid for nid, deg in in_degree.items() if deg == 0])
+        order: List[str] = []
         while queue:
-            node = queue.pop(0)
-            sorted_nodes.append(node)
-            for neighbor in adj.get(node, []):
-                in_degree[neighbor] -= 1
-                if in_degree[neighbor] == 0:
-                    queue.append(neighbor)
+            u = queue.popleft()
+            order.append(u)
+            for v in adj[u]:
+                in_degree[v] -= 1
+                if in_degree[v] == 0:
+                    queue.append(v)
 
-        # Include disconnected / cycle leftovers
-        for node in self.nodes:
-            if node not in sorted_nodes:
-                sorted_nodes.append(node)
+        if len(order) != len(self.nodes):
+            raise RuntimeError("Cycle detected in node graph.")
+        return order
 
-        return sorted_nodes
-
-    def evaluate(self, context: Optional[Dict[str, Any]] = None, force_all: bool = False) -> float:
-        """Execute the graph in topological order. Returns elapsed ms."""
+    def evaluate(self) -> Tuple[List[MeshData], List[Vec3]]:
         t0 = time.perf_counter()
-        self.is_evaluating = True
+        order = self.topological_order()
 
-        order = self.topological_sort()
-        for node in order:
-            if not force_all and not node._dirty:
+        incoming_map: Dict[Tuple[str, str], List[Wire]] = {}
+        for w in self.wires:
+            incoming_map.setdefault((w.dst_node, w.dst_socket), []).append(w)
+
+        for nid in order:
+            node = self.nodes[nid]
+            if not node.is_dirty and node.error_message is None:
                 continue
 
-            node.error = None
+            raw_inputs: Dict[str, Any] = {}
+            upstream_failed = False
+            for spec in node.inputs:
+                wires = incoming_map.get((nid, spec.id))
+                if not wires:
+                    continue
+                if len(wires) == 1:
+                    wire = wires[0]
+                    src = self.nodes.get(wire.src_node)
+                    if src and src.error_message:
+                        upstream_failed = True
+                        break
+                    if src:
+                        raw_inputs[spec.id] = src.cached_outputs.get(wire.src_socket)
+                else:
+                    multi_vals: List[Any] = []
+                    for wire in wires:
+                        src = self.nodes.get(wire.src_node)
+                        if src and src.error_message:
+                            upstream_failed = True
+                            break
+                        if src:
+                            val = src.cached_outputs.get(wire.src_socket)
+                            if isinstance(val, list):
+                                multi_vals.extend(val)
+                            elif val is not None:
+                                multi_vals.append(val)
+                    if upstream_failed:
+                        break
+                    raw_inputs[spec.id] = multi_vals
+
+            if upstream_failed:
+                node.error_message = "Upstream node error"
+                node.cached_outputs = {}
+                continue
+
             try:
-                node.compute(context=context)
-                node._dirty = False
-                for out_port in node.outputs:
-                    for conn in out_port.connections:
-                        conn.target.node._dirty = True
-            except Exception as ex:
-                node.error = str(ex)
-                log.warning(f"Error computing node {node.name} ({node.id}): {ex}")
+                node.cached_outputs = node.execute(raw_inputs)
+                node.error_message = None
+                node.is_dirty = False
+            except Exception as exc:
+                node.error_message = f"{type(exc).__name__}: {exc}\n{traceback.format_exc()}"
+                node.cached_outputs = {}
+                node.is_dirty = False
 
-        self.is_evaluating = False
-        elapsed_ms = (time.perf_counter() - t0) * 1000.0
-        return elapsed_ms
+        meshes, points = self.collect_preview_outputs()
+        self.last_eval_ms = (time.perf_counter() - t0) * 1000.0
+        if self.on_evaluated:
+            self.on_evaluated(meshes, points, self.last_eval_ms)
+        return meshes, points
 
-    def serialize(self) -> dict:
+    def collect_preview_outputs(self) -> Tuple[List[MeshData], List[Vec3]]:
+        meshes: List[MeshData] = []
+        points: List[Vec3] = []
+
+        def _extract_preview(val: Any, default_name: str = "Shape") -> None:
+            if val is None:
+                return
+            if isinstance(val, MeshData):
+                if val.vertices or val.edges:
+                    meshes.append(val)
+            elif isinstance(val, CurveData):
+                if val.points:
+                    meshes.append(val.to_wire_mesh(name=f"{default_name}_Curve"))
+            elif isinstance(val, Vec3):
+                points.append(val)
+            elif isinstance(val, dict):
+                if "outer" in val and isinstance(val["outer"], list):
+                    outer_pts = [p if isinstance(p, Vec3) else Vec3(*p) for p in val["outer"]]
+                    meshes.append(CurveData(points=outer_pts, closed=True).to_wire_mesh(name="Face_Outer"))
+                if "holes" in val and isinstance(val["holes"], list):
+                    for idx, h in enumerate(val["holes"]):
+                        h_pts = [p if isinstance(p, Vec3) else Vec3(*p) for p in h]
+                        meshes.append(CurveData(points=h_pts, closed=True).to_wire_mesh(name=f"Face_Hole_{idx+1}"))
+            elif isinstance(val, (list, tuple)):
+                for item in val:
+                    _extract_preview(item, default_name)
+
+        active_output_sources = set()
+        for node in self.nodes.values():
+            if (
+                getattr(node, "is_output_node", False)
+                and getattr(node, "is_enabled", True)
+                and getattr(node, "is_preview_visible", True)
+                and node.param_values.get("enabled", True)
+                and not node.error_message
+            ):
+                for w in self.wires:
+                    if w.dst_node == node.id:
+                        active_output_sources.add((w.src_node, w.src_socket))
+
+        for node in self.nodes.values():
+            if not getattr(node, "is_enabled", True) or not getattr(node, "is_preview_visible", True):
+                continue
+            if node.error_message:
+                continue
+
+            if getattr(node, "is_output_node", False):
+                if not node.param_values.get("enabled", True):
+                    continue
+                _extract_preview(node.cached_outputs.get("mesh_out"), default_name=node.title or "Output")
+                continue
+
+            for out_spec in node.outputs:
+                if (node.id, out_spec.id) in active_output_sources:
+                    continue
+                val = node.cached_outputs.get(out_spec.id)
+                _extract_preview(val, default_name=node.title or out_spec.label)
+
+        return meshes, points
+
+    # Backward compatibility alias
+    collect_scene_outputs = collect_preview_outputs
+
+    def collect_bake_outputs(self, specific_node_id: Optional[str] = None) -> List[MeshData]:
+        meshes: List[MeshData] = []
+
+        def _extract_bake(val: Any) -> None:
+            if val is None:
+                return
+            if isinstance(val, MeshData):
+                if val.vertices or val.edges:
+                    meshes.append(val)
+            elif isinstance(val, CurveData):
+                if len(val.points) >= 3 and val.closed:
+                    meshes.append(val.to_mesh_face())
+                elif val.points:
+                    meshes.append(val.to_wire_mesh())
+            elif isinstance(val, (list, tuple)):
+                for item in val:
+                    _extract_bake(item)
+
+        if specific_node_id and specific_node_id in self.nodes:
+            target_node = self.nodes[specific_node_id]
+            if getattr(target_node, "is_output_node", False):
+                _extract_bake(target_node.cached_outputs.get("mesh_out"))
+            else:
+                for val in target_node.cached_outputs.values():
+                    _extract_bake(val)
+            return meshes
+
+        all_output_nodes = [n for n in self.nodes.values() if getattr(n, "is_output_node", False)]
+        if all_output_nodes:
+            for node in all_output_nodes:
+                if not getattr(node, "is_enabled", True) or not getattr(node, "is_preview_visible", True) or node.error_message:
+                    continue
+                _extract_bake(node.cached_outputs.get("mesh_out"))
+        else:
+            for node in self.nodes.values():
+                if not getattr(node, "is_enabled", True) or not getattr(node, "is_preview_visible", True) or node.error_message:
+                    continue
+                for val in node.cached_outputs.values():
+                    _extract_bake(val)
+
+        return meshes
+
+    # ------------------------------------------------------------------
+    # Serialization & High-Speed Cloner
+    # ------------------------------------------------------------------
+    def _paste_nodes_from_data(self, data: Dict[str, Any], offset: Tuple[float, float] = (40.0, 40.0)) -> List[BaseNode]:
+        """Core high-speed cloner: instantiates nodes and re-links internal wires without redundant JSON string passes."""
+        import uuid
+        new_nodes: List[BaseNode] = []
+        id_map: Dict[str, str] = {}
+
+        for nd in data.get("nodes", []):
+            type_id = nd.get("type_id", "")
+            if type_id not in NODE_REGISTRY:
+                continue
+            old_id = nd.get("id")
+            fresh_id = uuid.uuid4().hex[:10]
+            if old_id:
+                id_map[old_id] = fresh_id
+
+            pos_list = nd.get("pos", [0.0, 0.0])
+            new_pos = (float(pos_list[0]) + offset[0], float(pos_list[1]) + offset[1])
+            node = self.add_node(type_id, pos=new_pos, node_id=fresh_id)
+            for k, v in nd.get("params", {}).items():
+                node.set_param(k, v)
+            node.is_enabled = nd.get("is_enabled", True)
+            node.is_preview_visible = nd.get("is_preview_visible", True)
+            node.custom_title = nd.get("custom_title")
+            for sid, cfg in nd.get("slider_configs", {}).items():
+                sp = node.get_input_spec(sid)
+                if sp and isinstance(cfg, dict):
+                    sp.min_val = cfg.get("min", sp.min_val)
+                    sp.max_val = cfg.get("max", sp.max_val)
+                    sp.step = cfg.get("step", sp.step)
+                    sp.decimals = cfg.get("decimals", sp.decimals)
+            node.is_dirty = True
+            new_nodes.append(node)
+
+        for wd in data.get("wires", []):
+            src = id_map.get(wd["src_node"])
+            dst = id_map.get(wd["dst_node"])
+            if src and dst:
+                self.connect(src, wd["src_socket"], dst, wd["dst_socket"], replace_existing=False)
+
+        return new_nodes
+
+    def copy_nodes(self, node_ids: List[str]) -> str:
+        id_set = set(node_ids)
+        nodes_data = [self.nodes[nid].to_dict() for nid in node_ids if nid in self.nodes]
+        wires_data = [w.to_dict() for w in self.wires if w.src_node in id_set and w.dst_node in id_set]
+        return json.dumps({"nodes": nodes_data, "wires": wires_data})
+
+    def paste_nodes(self, json_str: str, offset: Tuple[float, float] = (40.0, 40.0)) -> List[BaseNode]:
+        try:
+            data = json.loads(json_str)
+        except Exception:
+            return []
+        return self._paste_nodes_from_data(data, offset=offset)
+
+    def duplicate_nodes(self, node_ids: List[str], offset: Tuple[float, float] = (40.0, 40.0)) -> List[BaseNode]:
+        id_set = set(node_ids)
+        nodes_data = [self.nodes[nid].to_dict() for nid in node_ids if nid in self.nodes]
+        wires_data = [w.to_dict() for w in self.wires if w.src_node in id_set and w.dst_node in id_set]
+        return self._paste_nodes_from_data({"nodes": nodes_data, "wires": wires_data}, offset=offset)
+
+    def to_dict(self) -> Dict[str, Any]:
         return {
-            "version": 1,
-            "nodes": [n.serialize() for n in self.nodes],
-            "connections": [c.serialize() for c in self.connections]
+            "version": "1.0",
+            "nodes": [n.to_dict() for n in self.nodes.values()],
+            "wires": [w.to_dict() for w in self.wires],
         }
 
-    def deserialize(self, data: dict, node_registry: Dict[str, type]) -> None:
-        self.connections.clear()
+    def load_dict(self, data: Dict[str, Any]) -> None:
         self.nodes.clear()
-
-        id_map: Dict[str, NodeBase] = {}
+        self.wires.clear()
         for nd in data.get("nodes", []):
-            ntype = nd.get("type")
-            cls = node_registry.get(ntype)
-            if cls:
-                node = cls(node_id=nd.get("id"))
-                node.deserialize(nd)
-                node.graph = self
-                node._dirty = True
-                self.nodes.append(node)
-                id_map[node.id] = node
+            type_id = nd.get("type_id", "")
+            if type_id not in NODE_REGISTRY:
+                continue
+            pos_list = nd.get("pos", [0.0, 0.0])
+            node = self.add_node(type_id, pos=(float(pos_list[0]), float(pos_list[1])), node_id=nd.get("id"))
+            for k, v in nd.get("params", {}).items():
+                node.set_param(k, v)
+            node.is_enabled = nd.get("is_enabled", True)
+            node.is_preview_visible = nd.get("is_preview_visible", True)
+            node.custom_title = nd.get("custom_title")
+            for sid, cfg in nd.get("slider_configs", {}).items():
+                sp = node.get_input_spec(sid)
+                if sp and isinstance(cfg, dict):
+                    sp.min_val = cfg.get("min", sp.min_val)
+                    sp.max_val = cfg.get("max", sp.max_val)
+                    sp.step = cfg.get("step", sp.step)
+                    sp.decimals = cfg.get("decimals", sp.decimals)
+            node.is_dirty = True
 
-        for cd in data.get("connections", []):
-            src_node = id_map.get(cd.get("source_node"))
-            dst_node = id_map.get(cd.get("target_node"))
-            if src_node and dst_node:
-                s_name = cd.get("source_port")
-                t_name = cd.get("target_port")
-                src_port = next((p for p in src_node.outputs if p.name == s_name), None)
-                if not src_port:
-                    src_port = next((p for p in src_node.outputs if getattr(p, "original_name", None) == s_name), None)
+        for wd in data.get("wires", []):
+            self.connect(wd["src_node"], wd["src_socket"], wd["dst_node"], wd["dst_socket"], replace_existing=False)
 
-                dst_port = next((p for p in dst_node.inputs if p.name == t_name), None)
-                if not dst_port:
-                    dst_port = next((p for p in dst_node.inputs if getattr(p, "original_name", None) == t_name), None)
+    def save_file(self, path: str) -> None:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(self.to_dict(), f, indent=2)
 
-                if src_port and dst_port:
-                    self.connect(src_port, dst_port)
-
-        for node in self.nodes:
-            if hasattr(node, "sync_dynamic_ports"):
-                node.sync_dynamic_ports()
-
-        self.notify_changed()
+    def load_file(self, path: str) -> None:
+        with open(path, "r", encoding="utf-8") as f:
+            self.load_dict(json.load(f))
