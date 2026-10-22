@@ -899,6 +899,106 @@ class TestNewNodesAndUIEnhancements(unittest.TestCase):
         self.assertEqual(btns[0]["action"], "pick_color")
         self.assertIn("Pick Color", btns[0]["label"])
 
+    def test_pipe_solid_node(self):
+        """Verify Pipe Solid node creates watertight meshes along open and closed curves with wall thickness."""
+        self.assertIn("solid.pipe", NODE_REGISTRY)
+        pipe_node = NODE_REGISTRY["solid.pipe"]()
+        app = QApplication.instance() or QApplication([])
+        item = NodeItem(pipe_node, on_param_changed=lambda a, b, c: None)
+        self.assertTrue(item.has_preview_eye)
+
+        # 1. Unwired fallback
+        res_default = pipe_node.compute()
+        mesh_default = res_default.get("solid")
+        self.assertIsInstance(mesh_default, MeshData)
+        self.assertGreater(len(mesh_default.vertices), 0)
+        self.assertGreater(len(mesh_default.faces), 0)
+
+        # 2. Straight line pipe with radius and caps
+        c_line = CurveData(points=[Vec3(0, 0, 0), Vec3(0, 0, 4)], closed=False)
+        res_line = pipe_node.compute(curve=c_line, radius=0.25, segments=16, capped=True)
+        m_line = res_line["solid"]
+        self.assertEqual(len(m_line.vertices), 32)
+        self.assertEqual(len(m_line.faces), 18)  # 16 quads + 2 caps
+
+        # Check watertightness
+        edge_counts = {}
+        for f in m_line.faces:
+            for k in range(len(f)):
+                e = (min(f[k], f[(k + 1) % len(f)]), max(f[k], f[(k + 1) % len(f)]))
+                edge_counts[e] = edge_counts.get(e, 0) + 1
+        self.assertTrue(all(cnt == 2 for cnt in edge_counts.values()))
+
+        # 3. Hollow tube with wall thickness
+        res_tube = pipe_node.compute(curve=c_line, radius=0.25, thickness=0.05, segments=12, capped=True)
+        m_tube = res_tube["solid"]
+        self.assertEqual(len(m_tube.vertices), 48)  # 24 outer + 24 inner
+        edge_counts_tube = {}
+        for f in m_tube.faces:
+            for k in range(len(f)):
+                e = (min(f[k], f[(k + 1) % len(f)]), max(f[k], f[(k + 1) % len(f)]))
+                edge_counts_tube[e] = edge_counts_tube.get(e, 0) + 1
+        self.assertTrue(all(cnt == 2 for cnt in edge_counts_tube.values()))
+
+        # 4. Engine evaluation and badge text
+        engine = GraphEngine()
+        n_line = engine.add_node("curve.line")
+        n_pipe = engine.add_node("solid.pipe")
+        n_pipe.set_param("radius", 0.15)
+        engine.connect(n_line.id, "curve", n_pipe.id, "curve")
+        engine.evaluate()
+        pipe_out = n_pipe.cached_outputs.get("solid")
+        self.assertIsInstance(pipe_out, MeshData)
+        self.assertIn("R: 0.15m", n_pipe.get_card_badge_text())
+
+    def test_architectural_grid_node(self):
+        """Verify Architectural Grid node generates axis curves, bubbles, and intersection points from spacings."""
+        self.assertIn("arch.grid", NODE_REGISTRY)
+        grid_node = NODE_REGISTRY["arch.grid"]()
+        app = QApplication.instance() or QApplication([])
+        item = NodeItem(grid_node, on_param_changed=lambda a, b, c: None)
+        self.assertTrue(item.has_preview_eye)
+
+        # 1. Default unwired computation
+        res_default = grid_node.compute()
+        self.assertEqual(len(res_default["x_coords"]), 4)  # 0, 6, 12, 18
+        self.assertEqual(len(res_default["y_coords"]), 3)  # 0, 5, 10
+        self.assertEqual(len(res_default["points"]), 12)   # 4 x 3
+        self.assertEqual(len(res_default["x_lines"]), 4)
+        self.assertEqual(len(res_default["y_lines"]), 3)
+        self.assertGreater(len(res_default["bubbles"]), 0)
+        grid_mesh = res_default["mesh"]
+        self.assertIsInstance(grid_mesh, MeshData)
+        self.assertEqual(grid_mesh.ifc_class, "IfcGrid")
+        self.assertGreater(len(grid_mesh.edges), 0)
+
+        # 2. Custom spacings list
+        res_custom = grid_node.compute(
+            x_spacings=[4.0, 5.0, 6.0],
+            y_spacings=[6.0, 6.0],
+            extension=2.0,
+            bubble_radius=0.5,
+            both_ends=True,
+        )
+        self.assertEqual(res_custom["x_coords"], [0.0, 4.0, 9.0, 15.0])
+        self.assertEqual(res_custom["y_coords"], [0.0, 6.0, 12.0])
+        self.assertEqual(len(res_custom["points"]), 12)
+        # With both_ends=True: 4 top + 4 bottom + 3 left + 3 right = 14 bubbles
+        self.assertEqual(len(res_custom["bubbles"]), 14)
+
+        # 3. Graph Engine with Panel node wired to x_spacings
+        engine = GraphEngine()
+        panel = engine.add_node("input.panel")
+        panel.set_param("text", "4.0\n5.0\n4.0")
+        grid = engine.add_node("arch.grid")
+        engine.connect(panel.id, "out", grid.id, "x_spacings")
+
+        engine.evaluate()
+        x_coords = grid.cached_outputs.get("x_coords")
+        self.assertEqual(x_coords, [0.0, 4.0, 9.0, 13.0])
+        self.assertIn("Axes", grid.get_card_badge_text())
+
+
 
 if __name__ == "__main__":
     unittest.main()

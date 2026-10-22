@@ -5,3 +5,4 @@ __pycache__/
 target/
 **/target/
 *.pdb
+icons_sheet.jpg

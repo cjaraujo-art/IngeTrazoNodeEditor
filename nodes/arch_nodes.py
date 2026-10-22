@@ -227,3 +227,226 @@ class SlabNode(BaseNode):
             ifc_class="IfcSlab",
         )
         return {"slab_mesh": slab_mesh, "top_face": CurveData(points=pts, closed=True).to_mesh_face("SlabTop")}
+
+
+# ============================================================================
+# 3. Architectural Grid Node (Structural Axes)
+# ============================================================================
+def _parse_grid_spacings(val: Any, fallback: List[float]) -> List[float]:
+    """
+    Parses distances between axes from:
+    - Lists of floats/ints/strings from Panel or Math nodes
+    - Multi-line or comma/space separated strings
+    - Single float or int
+    """
+    if val is None:
+        return list(fallback)
+    if isinstance(val, (int, float)):
+        v = float(val)
+        return [v] if v > 1e-4 else list(fallback)
+    if isinstance(val, str):
+        cleaned = val.replace(";", ",").replace("\n", ",")
+        parts = [p.strip() for p in cleaned.split(",") if p.strip()]
+        if len(parts) <= 1 and " " in val.strip():
+            parts = [p.strip() for p in val.strip().split() if p.strip()]
+        res: List[float] = []
+        for p in parts:
+            try:
+                num = float(p)
+                if num > 1e-4:
+                    res.append(num)
+            except ValueError:
+                pass
+        return res if res else list(fallback)
+    if isinstance(val, (list, tuple)):
+        res: List[float] = []
+        for item in val:
+            if isinstance(item, (int, float)):
+                if float(item) > 1e-4:
+                    res.append(float(item))
+            elif isinstance(item, str):
+                sub = _parse_grid_spacings(item, [])
+                res.extend(sub)
+        return res if res else list(fallback)
+    return list(fallback)
+
+
+@register_node
+class ArchitecturalGridNode(BaseNode):
+    type_id = "arch.grid"
+    title = "Architectural Grid"
+    category = "Architecture"
+    description = (
+        "Generates parametric architectural grid axes (structural gridlines) from lists of\n"
+        "spacing distances between consecutive X and Y axes.\n"
+        "Connect directly to Panel nodes (multi-line or comma-separated numbers) or numeric lists.\n"
+        "Outputs axis curves (X lines, Y lines), bubble markers, intersection points for columns/foundations, and a 3D wireframe mesh."
+    )
+    header_color = (191, 97, 106)
+
+    inputs = [
+        InputSpec("x_spacings", "X Spacings", SocketType.ANY, default="6.0, 6.0, 6.0", access=AccessMode.LIST),
+        InputSpec("y_spacings", "Y Spacings", SocketType.ANY, default="5.0, 5.0", access=AccessMode.LIST),
+        InputSpec("extension", "Extension (m)", SocketType.FLOAT, default=1.5, min_val=0.0, max_val=20.0, step=0.5),
+        InputSpec("bubble_radius", "Bubble Radius (m)", SocketType.FLOAT, default=0.45, min_val=0.0, max_val=5.0, step=0.05),
+        InputSpec("elevation", "Elevation (m)", SocketType.FLOAT, default=0.0, step=0.5),
+        InputSpec("origin", "Origin", SocketType.VEC3, default=Vec3(0, 0, 0), hide_widget=True),
+        InputSpec("both_ends", "Both Ends Bubbles", SocketType.BOOL, default=False),
+    ]
+    outputs = [
+        OutputSpec("curves", "All Curves", SocketType.CURVE),
+        OutputSpec("x_lines", "X Axis Lines", SocketType.CURVE),
+        OutputSpec("y_lines", "Y Axis Lines", SocketType.CURVE),
+        OutputSpec("points", "Grid Points", SocketType.VEC3),
+        OutputSpec("bubbles", "Bubbles", SocketType.CURVE),
+        OutputSpec("mesh", "Grid Wire Mesh", SocketType.MESH),
+        OutputSpec("x_coords", "X Coords", SocketType.ANY),
+        OutputSpec("y_coords", "Y Coords", SocketType.ANY),
+    ]
+
+    def get_card_badge_text(self) -> Optional[str]:
+        x_c = self.cached_outputs.get("x_coords")
+        y_c = self.cached_outputs.get("y_coords")
+        pts = self.cached_outputs.get("points")
+        if isinstance(x_c, list) and isinstance(y_c, list):
+            pt_count = len(pts) if isinstance(pts, list) else len(x_c) * len(y_c)
+            return f"{len(x_c)} × {len(y_c)} Axes ({pt_count} Pts)"
+        return None
+
+    def compute(
+        self,
+        x_spacings: Any = None,
+        y_spacings: Any = None,
+        extension: float = 1.5,
+        bubble_radius: float = 0.45,
+        elevation: float = 0.0,
+        origin: Vec3 = Vec3(0, 0, 0),
+        both_ends: bool = False,
+    ) -> Dict[str, Any]:
+        x_sp = _parse_grid_spacings(x_spacings, [6.0, 6.0, 6.0])
+        y_sp = _parse_grid_spacings(y_spacings, [5.0, 5.0])
+        ext = max(0.0, float(extension))
+        r_bubble = max(0.0, float(bubble_radius))
+        orig = origin if isinstance(origin, Vec3) else Vec3()
+        z = orig.z + float(elevation)
+
+        # Accumulate X coordinates
+        x_coords = [orig.x]
+        for d in x_sp:
+            x_coords.append(round(x_coords[-1] + d, 4))
+
+        # Accumulate Y coordinates
+        y_coords = [orig.y]
+        for d in y_sp:
+            y_coords.append(round(y_coords[-1] + d, 4))
+
+        x_min, x_max = x_coords[0], x_coords[-1]
+        y_min, y_max = y_coords[0], y_coords[-1]
+
+        y_line_s = y_min - ext
+        y_line_e = y_max + ext
+        x_line_s = x_min - ext
+        x_line_e = x_max + ext
+
+        # Generate vertical axis lines (running along Y, placed at each X)
+        x_lines: List[CurveData] = []
+        for x in x_coords:
+            x_lines.append(CurveData(points=[Vec3(x, y_line_s, z), Vec3(x, y_line_e, z)], closed=False))
+
+        # Generate horizontal axis lines (running along X, placed at each Y)
+        y_lines: List[CurveData] = []
+        for y in y_coords:
+            y_lines.append(CurveData(points=[Vec3(x_line_s, y, z), Vec3(x_line_e, y, z)], closed=False))
+
+        # Intersection grid points
+        grid_points: List[Vec3] = []
+        for x in x_coords:
+            for y in y_coords:
+                grid_points.append(Vec3(x, y, z))
+
+        # Grid bubbles (circular curves at axis terminals)
+        bubbles: List[CurveData] = []
+        num_circle_segs = 24
+        if r_bubble > 1e-4:
+            # Vertical axes bubbles (at top, and optionally at bottom)
+            for x in x_coords:
+                top_c = Vec3(x, y_line_e + r_bubble, z)
+                top_pts = [
+                    Vec3(top_c.x + r_bubble * math.cos(i * 2.0 * math.pi / num_circle_segs),
+                         top_c.y + r_bubble * math.sin(i * 2.0 * math.pi / num_circle_segs),
+                         z)
+                    for i in range(num_circle_segs)
+                ]
+                bubbles.append(CurveData(points=top_pts, closed=True))
+
+                if both_ends:
+                    bot_c = Vec3(x, y_line_s - r_bubble, z)
+                    bot_pts = [
+                        Vec3(bot_c.x + r_bubble * math.cos(i * 2.0 * math.pi / num_circle_segs),
+                             bot_c.y + r_bubble * math.sin(i * 2.0 * math.pi / num_circle_segs),
+                             z)
+                        for i in range(num_circle_segs)
+                    ]
+                    bubbles.append(CurveData(points=bot_pts, closed=True))
+
+            # Horizontal axes bubbles (at left, and optionally at right)
+            for y in y_coords:
+                left_c = Vec3(x_line_s - r_bubble, y, z)
+                left_pts = [
+                    Vec3(left_c.x + r_bubble * math.cos(i * 2.0 * math.pi / num_circle_segs),
+                         left_c.y + r_bubble * math.sin(i * 2.0 * math.pi / num_circle_segs),
+                         z)
+                    for i in range(num_circle_segs)
+                ]
+                bubbles.append(CurveData(points=left_pts, closed=True))
+
+                if both_ends:
+                    right_c = Vec3(x_line_e + r_bubble, y, z)
+                    right_pts = [
+                        Vec3(right_c.x + r_bubble * math.cos(i * 2.0 * math.pi / num_circle_segs),
+                             right_c.y + r_bubble * math.sin(i * 2.0 * math.pi / num_circle_segs),
+                             z)
+                        for i in range(num_circle_segs)
+                    ]
+                    bubbles.append(CurveData(points=right_pts, closed=True))
+
+        all_curves = list(x_lines) + list(y_lines) + list(bubbles)
+
+        # Build combined 3D wireframe MeshData
+        mesh_verts: List[Tuple[float, float, float]] = []
+        mesh_edges: List[Tuple[int, int]] = []
+
+        def _add_curve_to_mesh(c: CurveData) -> None:
+            if not c.points:
+                return
+            base_idx = len(mesh_verts)
+            for p in c.points:
+                mesh_verts.append((p.x, p.y, p.z))
+            k = len(c.points)
+            for i in range(k - 1):
+                mesh_edges.append((base_idx + i, base_idx + i + 1))
+            if c.closed and k >= 3:
+                mesh_edges.append((base_idx + k - 1, base_idx))
+
+        for c in all_curves:
+            _add_curve_to_mesh(c)
+
+        grid_mesh = MeshData(
+            vertices=mesh_verts,
+            faces=[],
+            edges=mesh_edges,
+            name="Architectural_Grid",
+            ifc_class="IfcGrid",
+        )
+
+        return {
+            "curves": all_curves,
+            "x_lines": x_lines,
+            "y_lines": y_lines,
+            "points": grid_points,
+            "bubbles": bubbles,
+            "mesh": grid_mesh,
+            "x_coords": x_coords,
+            "y_coords": y_coords,
+        }
+

@@ -987,7 +987,7 @@ class NodeItem(QGraphicsItem):
             cb.toggled.connect(lambda v, sid=spec.id: self.on_param_changed(self.node.id, sid, bool(v)))
             return cb, 14.0
 
-        if spec.type == SocketType.STRING:
+        if spec.type == SocketType.STRING or (spec.type == SocketType.ANY and isinstance(val, str) and not spec.hide_widget):
             half_w = int(self.WIDTH - 100.0)
             le = QLineEdit(str(val) if val is not None else "")
             le.setFixedSize(half_w, 22)

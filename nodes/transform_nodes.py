@@ -467,7 +467,255 @@ class SweepNode(BaseNode):
 
 
 # ============================================================================
-# 9. Flip Normals / Faces Node
+# 9. Pipe Solid Node
+# ============================================================================
+@register_node
+class PipeNode(BaseNode):
+    type_id = "solid.pipe"
+    title = "Pipe Solid"
+    category = "3D Solids"
+    description = (
+        "Creates a watertight cylindrical pipe or hollow tube solid along rail curve(s).\n"
+        "Uses rotation-minimizing parallel transport frames to avoid twisting.\n"
+        "Supports radius, wall thickness, radial segments, and capping options."
+    )
+    header_color = (155, 89, 182)
+
+    inputs = [
+        InputSpec("curve", "Curve / Rail", SocketType.CURVE, default=None, hide_widget=True),
+        InputSpec("radius", "Radius (m)", SocketType.FLOAT, default=0.10, min_val=0.001, max_val=10.0, step=0.01, decimals=3),
+        InputSpec("thickness", "Thickness (m)", SocketType.FLOAT, default=0.0, min_val=0.0, max_val=5.0, step=0.005, decimals=3),
+        InputSpec("segments", "Segments", SocketType.INT, default=16, min_val=3, max_val=64, step=1),
+        InputSpec("capped", "Cap Ends", SocketType.BOOL, default=True),
+    ]
+    outputs = [
+        OutputSpec("solid", "Pipe Solid", SocketType.MESH),
+        OutputSpec("centerline", "Centerline", SocketType.CURVE),
+    ]
+
+    def get_card_badge_text(self) -> Optional[str]:
+        r = float(self.param_values.get("radius", 0.1))
+        th = float(self.param_values.get("thickness", 0.0))
+        if 0.0 < th < r:
+            return f"R: {r:.2f}m (Wall: {th:.2f}m)"
+        return f"R: {r:.2f}m"
+
+    def compute(
+        self,
+        curve: Any = None,
+        radius: float = 0.10,
+        thickness: float = 0.0,
+        segments: int = 16,
+        capped: bool = True,
+    ) -> Dict[str, Any]:
+        # Fallback trajectory if unwired
+        if not isinstance(curve, CurveData) or len(curve.points) < 2:
+            rail_pts = [
+                Vec3(0.0, 0.0, 0.0),
+                Vec3(0.0, 0.0, 1.5),
+                Vec3(1.0, 0.0, 2.5),
+                Vec3(2.5, 0.0, 2.5),
+            ]
+            curve = CurveData(points=rail_pts, closed=False)
+
+        pts = curve.points
+        if len(pts) < 2:
+            return {"solid": MeshData(name="Pipe_Solid"), "centerline": curve}
+
+        # Filter out duplicate consecutive points
+        clean_pts = [pts[0]]
+        for p in pts[1:]:
+            if (p - clean_pts[-1]).length() > 1e-6:
+                clean_pts.append(p)
+        if len(clean_pts) < 2:
+            return {"solid": MeshData(name="Pipe_Solid"), "centerline": curve}
+
+        n = len(clean_pts)
+        is_closed = curve.closed or (clean_pts[0].distance_to(clean_pts[-1]) < 1e-4 and n >= 3)
+        if is_closed and clean_pts[0].distance_to(clean_pts[-1]) < 1e-4:
+            clean_pts = clean_pts[:-1]
+            n = len(clean_pts)
+            if n < 3:
+                return {"solid": MeshData(name="Pipe_Solid"), "centerline": curve}
+
+        # 1. Compute tangents along the curve
+        tangents: List[Vec3] = []
+        for i in range(n):
+            if is_closed:
+                p_prev = clean_pts[(i - 1) % n]
+                p_next = clean_pts[(i + 1) % n]
+                t = (p_next - p_prev).normalized()
+            else:
+                if i == 0:
+                    t = (clean_pts[1] - clean_pts[0]).normalized()
+                elif i == n - 1:
+                    t = (clean_pts[n - 1] - clean_pts[n - 2]).normalized()
+                else:
+                    t = (clean_pts[i + 1] - clean_pts[i - 1]).normalized()
+            tangents.append(t if t.length() > 1e-6 else Vec3(0, 0, 1))
+
+        # 2. Parallel Transport Frame (Double Reflection Method / Wang et al.)
+        normals: List[Vec3] = []
+        binormals: List[Vec3] = []
+
+        t0 = tangents[0]
+        guide = Vec3(0, 0, 1) if abs(t0.z) < 0.9 else Vec3(1, 0, 0)
+        n0 = t0.cross(guide).normalized()
+        b0 = t0.cross(n0).normalized()
+        normals.append(n0)
+        binormals.append(b0)
+
+        for i in range(1, n):
+            p_prev = clean_pts[i - 1]
+            p_curr = clean_pts[i]
+            v1 = p_curr - p_prev
+            c1 = v1.dot(v1)
+
+            t_prev = tangents[i - 1]
+            t_curr = tangents[i]
+            n_prev = normals[i - 1]
+
+            if c1 > 1e-12:
+                r_l_t = t_prev - v1 * ((2.0 / c1) * v1.dot(t_prev))
+                r_l_n = n_prev - v1 * ((2.0 / c1) * v1.dot(n_prev))
+                v2 = t_curr - r_l_t
+                c2 = v2.dot(v2)
+                if c2 > 1e-12:
+                    n_curr = (r_l_n - v2 * ((2.0 / c2) * v2.dot(r_l_n))).normalized()
+                else:
+                    n_curr = r_l_n.normalized()
+            else:
+                n_curr = n_prev
+
+            b_curr = t_curr.cross(n_curr).normalized()
+            normals.append(n_curr)
+            binormals.append(b_curr)
+
+        r_out = max(1e-4, float(radius))
+        has_wall = 0.0 < float(thickness) < r_out
+        r_in = r_out - float(thickness) if has_wall else 0.0
+        segs = max(3, int(segments))
+
+        mesh_verts: List[Tuple[float, float, float]] = []
+        # Outer rings
+        for i in range(n):
+            c = clean_pts[i]
+            ni, bi = normals[i], binormals[i]
+            for j in range(segs):
+                ang = 2.0 * math.pi * j / segs
+                p = c + ni * (r_out * math.cos(ang)) + bi * (r_out * math.sin(ang))
+                mesh_verts.append((p.x, p.y, p.z))
+
+        inner_offset = len(mesh_verts)
+        if has_wall:
+            for i in range(n):
+                c = clean_pts[i]
+                ni, bi = normals[i], binormals[i]
+                for j in range(segs):
+                    ang = 2.0 * math.pi * j / segs
+                    p = c + ni * (r_in * math.cos(ang)) + bi * (r_in * math.sin(ang))
+                    mesh_verts.append((p.x, p.y, p.z))
+
+        mesh_faces: List[List[int]] = []
+        mesh_edges_set = set()
+
+        def _add_edge(a: int, b: int) -> None:
+            mesh_edges_set.add((min(a, b), max(a, b)))
+
+        station_count = n if is_closed else n - 1
+
+        # Outer cylinder quads
+        for i in range(station_count):
+            nxt_i = (i + 1) % n
+            base_a = i * segs
+            base_b = nxt_i * segs
+            for j in range(segs):
+                nxt_j = (j + 1) % segs
+                i00 = base_a + j
+                i01 = base_a + nxt_j
+                i11 = base_b + nxt_j
+                i10 = base_b + j
+                mesh_faces.append([i00, i01, i11, i10])
+                _add_edge(i00, i01)
+                _add_edge(i01, i11)
+                _add_edge(i11, i10)
+                _add_edge(i10, i00)
+
+        # Inner cylinder quads (reversed winding so normal points into the void)
+        if has_wall:
+            for i in range(station_count):
+                nxt_i = (i + 1) % n
+                base_a = inner_offset + i * segs
+                base_b = inner_offset + nxt_i * segs
+                for j in range(segs):
+                    nxt_j = (j + 1) % segs
+                    i00 = base_a + j
+                    i01 = base_a + nxt_j
+                    i11 = base_b + nxt_j
+                    i10 = base_b + j
+                    mesh_faces.append([i00, i10, i11, i01])
+                    _add_edge(i00, i10)
+                    _add_edge(i10, i11)
+                    _add_edge(i11, i01)
+                    _add_edge(i01, i00)
+
+        # Capping for open curves
+        if capped and not is_closed:
+            if has_wall:
+                # Annular ring caps
+                # Start cap (facing backwards: reversed)
+                for j in range(segs):
+                    nxt_j = (j + 1) % segs
+                    o0 = j
+                    o1 = nxt_j
+                    i0 = inner_offset + j
+                    i1 = inner_offset + nxt_j
+                    mesh_faces.append([o0, i0, i1, o1])
+                    _add_edge(o0, i0)
+                    _add_edge(i0, i1)
+                    _add_edge(i1, o1)
+                    _add_edge(o1, o0)
+                # End cap (facing forward)
+                end_out = (n - 1) * segs
+                end_in = inner_offset + (n - 1) * segs
+                for j in range(segs):
+                    nxt_j = (j + 1) % segs
+                    o0 = end_out + j
+                    o1 = end_out + nxt_j
+                    i0 = end_in + j
+                    i1 = end_in + nxt_j
+                    mesh_faces.append([o0, o1, i1, i0])
+                    _add_edge(o0, o1)
+                    _add_edge(o1, i1)
+                    _add_edge(i1, i0)
+                    _add_edge(i0, o0)
+            else:
+                # Solid circular disc caps
+                # Start cap (facing backwards: reversed)
+                start_cap = list(reversed(range(0, segs)))
+                mesh_faces.insert(0, start_cap)
+                for j in range(segs):
+                    _add_edge(j, (j + 1) % segs)
+                # End cap (facing forward)
+                end_base = (n - 1) * segs
+                end_cap = list(range(end_base, end_base + segs))
+                mesh_faces.append(end_cap)
+                for j in range(segs):
+                    _add_edge(end_base + j, end_base + (j + 1) % segs)
+
+        solid_mesh = MeshData(
+            vertices=mesh_verts,
+            faces=mesh_faces,
+            edges=list(mesh_edges_set),
+            name="Pipe_Solid",
+            ifc_class="IfcBuildingElementProxy",
+        )
+
+        return {"solid": solid_mesh, "centerline": curve}
+
+
+# ============================================================================
+# 10. Flip Normals / Faces Node
 # ============================================================================
 @register_node
 class FlipNormalsNode(BaseNode):

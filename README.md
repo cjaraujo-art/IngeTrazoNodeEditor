@@ -14,6 +14,8 @@ A visual parametric modeling node editor built specifically for **IngeTrazo**.
 - **Ribbon Shelf & Themed Icons**: Categorized tabbed shelf with invertable light/dark mode vector icons, hover tooltips, and collapsible toggle.
 - **Node Properties Inspector**: Live floating inspector panel to edit node titles, nicknames, and slider parameters (`min`, `max`, `step`, `decimals`) with instant canvas updates.
 - **Curve & Surface Points Extraction**: Extract sampled points, boundary loops, and vertices from 3D curves and NURBS/mesh surface boundaries.
+- **Architectural Grid Axes**: Generate 2D/3D structural gridlines with axis curves, circular bubble markers (1, 2, 3... and A, B, C...), and column intersection points directly driven by lists of spacings from Panels or numeric sliders.
+- **Pipe Solid & Sweep**: Extrude watertight cylindrical pipes and hollow tubes along 3D curves with radius, wall thickness, radial segments, and capping.
 - **Watertight Solid Geometry**: Solids, slabs, columns, beams, walls, parametric roofs, and monolithic stairs with automated vertex welding and hermetic volume calculation.
 - **Two-Tier Viewport Bridge**:
   - **Live 60 FPS Sync**: Streams preview geometry via a 16 ms debounce timer into transient `_ingetrazo_node_preview` groups without polluting the undo stack.
@@ -38,11 +40,11 @@ node_editor/
 ├── nodes/
 │   ├── __init__.py          # Dynamic auto-loader & hot-reloader for all node modules
 │   ├── builtin_nodes.py     # Math, vectors, logic, panels, value lists, BIM Output
-│   ├── arch_nodes.py        # Walls, columns, slabs, openings, parametric arch elements
+│   ├── arch_nodes.py        # Walls, slabs, architectural grid axes, parametric arch elements
 │   ├── curve_nodes.py       # Lines, arcs, circles, splines, curve points extraction
 │   ├── roof_node.py         # Parametric hip, gable, and shed roofs
 │   ├── stair_node.py        # Monolithic concrete stairs and landings
-│   ├── transform_nodes.py   # Move, rotate, scale, mirror, polar array, grid array
+│   ├── transform_nodes.py   # Move, rotate, scale, pipe solid, sweep solid, arrays
 │   ├── image_nodes.py       # Heightmaps, displacement meshes, image samplers
 │   ├── material_nodes.py    # Colors, shaders, and visual preview materials
 │   ├── scene_nodes.py       # Scene reference, object picking, and bake conduits
