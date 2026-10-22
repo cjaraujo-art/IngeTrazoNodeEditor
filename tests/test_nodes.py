@@ -998,6 +998,74 @@ class TestNewNodesAndUIEnhancements(unittest.TestCase):
         self.assertEqual(x_coords, [0.0, 4.0, 9.0, 13.0])
         self.assertIn("Axes", grid.get_card_badge_text())
 
+    def test_locked_node_sends_no_data(self):
+        """Verify that when a node is locked/disabled, it sends no data and downstream nodes do not evaluate."""
+        engine = GraphEngine()
+        panel = engine.add_node("input.panel")
+        panel.set_param("text", "4.0\n5.0\n6.0")
+        grid = engine.add_node("arch.grid")
+        engine.connect(panel.id, "out", grid.id, "x_spacings")
+
+        # Active evaluation
+        meshes, _ = engine.evaluate()
+        self.assertGreater(len(meshes), 0)
+        self.assertIsNotNone(grid.cached_outputs.get("x_coords"))
+
+        # Lock / disable the panel
+        panel.is_enabled = False
+        engine.mark_dirty(panel.id)
+        meshes_disabled, _ = engine.evaluate()
+
+        # Grid receives no data, so it outputs None and produces 0 meshes
+        self.assertIsNone(panel.cached_outputs.get("out"))
+        self.assertIsNone(grid.cached_outputs.get("x_coords"))
+        self.assertEqual(len(meshes_disabled), 0)
+
+        # Re-enable the panel
+        panel.is_enabled = True
+        engine.mark_dirty(panel.id)
+        meshes_re_enabled, _ = engine.evaluate()
+        self.assertGreater(len(meshes_re_enabled), 0)
+        self.assertEqual(grid.cached_outputs.get("x_coords"), [0.0, 4.0, 9.0, 15.0])
+
+    def test_roof_straight_skeleton_only(self):
+        """Verify roof node has no dropdown style choices and generates straight skeleton hip roof."""
+        roof_cls = NODE_REGISTRY["arch.roof"]
+        input_ids = [inp.id for inp in roof_cls.inputs]
+        self.assertNotIn("style", input_ids)
+
+        roof = roof_cls()
+        boundary = [Vec3(0, 0, 0), Vec3(10, 0, 0), Vec3(10, 6, 0), Vec3(0, 6, 0)]
+        c_boundary = CurveData(points=boundary, closed=True)
+        res = roof.compute(boundary=c_boundary, pitch=30.0, overhang=0.5, thickness=0.2)
+        mesh = res.get("solid")
+        self.assertIsInstance(mesh, MeshData)
+        self.assertGreater(len(mesh.vertices), 0)
+        self.assertGreater(len(mesh.faces), 0)
+
+    def test_panel_single_output_and_checkbox_style(self):
+        """Verify panel node has single output pin and checkbox has indicator outline styling."""
+        panel_cls = NODE_REGISTRY["input.panel"]
+        self.assertEqual(len(panel_cls.outputs), 1)
+        self.assertEqual(panel_cls.outputs[0].id, "out")
+        self.assertEqual(panel_cls.outputs[0].label, "Output")
+
+        app = QApplication.instance() or QApplication([])
+        panel_node = panel_cls()
+        panel_item = NodeItem(panel_node, on_param_changed=lambda a, b, c: None)
+        self.assertIn("out", panel_item.output_sockets)
+
+        # Check toggle / boolean checkbox on architectural grid
+        grid_node = NODE_REGISTRY["arch.grid"]
+        grid_item = NodeItem(grid_node(), on_param_changed=lambda a, b, c: None)
+        proxy = grid_item.proxies.get("both_ends")
+        self.assertIsNotNone(proxy)
+        w = proxy.widget()
+        from PySide6.QtWidgets import QCheckBox
+        self.assertIsInstance(w, QCheckBox)
+        self.assertIn("QCheckBox::indicator", w.styleSheet())
+        self.assertIn("border:", w.styleSheet())
+
 
 
 if __name__ == "__main__":

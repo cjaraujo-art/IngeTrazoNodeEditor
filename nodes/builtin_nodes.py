@@ -124,7 +124,6 @@ class PanelNode(BaseNode):
     ]
     outputs = [
         OutputSpec("out", "Output", SocketType.ANY),
-        OutputSpec("text", "Text", SocketType.STRING),
     ]
 
     def compute(self, data: Any = None, text: Optional[str] = None) -> Dict[str, Any]:

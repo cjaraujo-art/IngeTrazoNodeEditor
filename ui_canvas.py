@@ -562,15 +562,15 @@ class NodeItem(QGraphicsItem):
 
     def _build_sockets_and_widgets(self) -> None:
         if self.node.type_id == "input.panel":
-            for out_spec in self.node.outputs:
-                y = self.HEADER_H + 14.0
+            for out_idx, out_spec in enumerate(self.node.outputs):
+                y = self.HEADER_H + 14.0 + out_idx * 20.0
                 self._output_row_y[out_spec.id] = y
                 sock = SocketItem(self, out_spec.id, out_spec.label, out_spec.type, is_output=True)
                 sock.setPos(self.WIDTH, y)
                 self.output_sockets[out_spec.id] = sock
 
-            for in_spec in self.node.inputs:
-                y = self.HEADER_H + 14.0
+            for in_idx, in_spec in enumerate(self.node.inputs):
+                y = self.HEADER_H + 14.0 + in_idx * 20.0
                 self._input_row_y[in_spec.id] = y
                 sock = SocketItem(self, in_spec.id, in_spec.label, in_spec.type, is_output=False)
                 sock.setPos(0.0, y)
@@ -819,7 +819,8 @@ class NodeItem(QGraphicsItem):
         self.node.is_dirty = True
         self.update()
         sc = self.scene()
-        if hasattr(sc, "trigger_eval"):
+        if sc and hasattr(sc, "engine"):
+            sc.engine.mark_dirty(self.node.id)
             sc.trigger_eval()
 
     def _on_slider_changed(self, sid: str, v: Any) -> None:
@@ -983,7 +984,32 @@ class NodeItem(QGraphicsItem):
         if spec.type == SocketType.BOOL:
             cb = QCheckBox(spec.label)
             cb.setChecked(bool(val))
-            cb.setStyleSheet("color: #d8dee9; font-size: 11px; background: transparent;")
+            base_dir = os.path.dirname(os.path.abspath(__file__))
+            chk_icon = os.path.join(base_dir, "icons", "checkmark.png").replace("\\", "/")
+            cb.setStyleSheet(f"""
+                QCheckBox {{
+                    color: #d8dee9;
+                    font-size: 11px;
+                    background: transparent;
+                    spacing: 6px;
+                }}
+                QCheckBox::indicator {{
+                    width: 14px;
+                    height: 14px;
+                    border: 1px solid #7e8798;
+                    border-radius: 3px;
+                    background: #252932;
+                }}
+                QCheckBox::indicator:hover {{
+                    border-color: #88c0d0;
+                    background: #2e3440;
+                }}
+                QCheckBox::indicator:checked {{
+                    background: #3875d7;
+                    border-color: #81a1c1;
+                    image: url("{chk_icon}");
+                }}
+            """)
             cb.toggled.connect(lambda v, sid=spec.id: self.on_param_changed(self.node.id, sid, bool(v)))
             return cb, 14.0
 
@@ -1780,6 +1806,8 @@ class NodeCanvasView(QGraphicsView):
             it.node.is_enabled = target_state
             it.node.is_dirty = True
             it.update()
+            if hasattr(self.canvas_scene, "engine"):
+                self.canvas_scene.engine.mark_dirty(it.node.id)
         self.canvas_scene.trigger_eval()
 
     def toggle_selected_preview(self) -> None:
@@ -2636,6 +2664,32 @@ class NodeInspectorPanel(QWidget):
                 has_any_param = True
                 chk = QCheckBox(in_spec.label)
                 chk.setChecked(bool(node.param_values.get(in_spec.id, in_spec.default)))
+                base_dir = os.path.dirname(os.path.abspath(__file__))
+                chk_icon = os.path.join(base_dir, "icons", "checkmark.png").replace("\\", "/")
+                chk.setStyleSheet(f"""
+                    QCheckBox {{
+                        color: #d8dee9;
+                        font-size: 11px;
+                        background: transparent;
+                        spacing: 6px;
+                    }}
+                    QCheckBox::indicator {{
+                        width: 14px;
+                        height: 14px;
+                        border: 1px solid #7e8798;
+                        border-radius: 3px;
+                        background: #252932;
+                    }}
+                    QCheckBox::indicator:hover {{
+                        border-color: #88c0d0;
+                        background: #2e3440;
+                    }}
+                    QCheckBox::indicator:checked {{
+                        background: #3875d7;
+                        border-color: #81a1c1;
+                        image: url("{chk_icon}");
+                    }}
+                """)
                 pid = in_spec.id
 
                 def _on_chk(c, p=pid):

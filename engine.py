@@ -189,11 +189,18 @@ class GraphEngine:
 
         for nid in order:
             node = self.nodes[nid]
+            if not node.is_enabled:
+                node.cached_outputs = {out.id: None for out in node.outputs}
+                node.error_message = None
+                node.is_dirty = False
+                continue
+
             if not node.is_dirty and node.error_message is None:
                 continue
 
             raw_inputs: Dict[str, Any] = {}
             upstream_failed = False
+            upstream_disabled = False
             for spec in node.inputs:
                 wires = incoming_map.get((nid, spec.id))
                 if not wires:
@@ -204,28 +211,43 @@ class GraphEngine:
                     if src and src.error_message:
                         upstream_failed = True
                         break
+                    if src and (not src.is_enabled or src.cached_outputs.get(wire.src_socket) is None):
+                        upstream_disabled = True
+                        break
                     if src:
                         raw_inputs[spec.id] = src.cached_outputs.get(wire.src_socket)
                 else:
                     multi_vals: List[Any] = []
+                    all_srcs_disabled = True
                     for wire in wires:
                         src = self.nodes.get(wire.src_node)
                         if src and src.error_message:
                             upstream_failed = True
                             break
+                        if src and not src.is_enabled:
+                            continue
                         if src:
                             val = src.cached_outputs.get(wire.src_socket)
-                            if isinstance(val, list):
-                                multi_vals.extend(val)
-                            elif val is not None:
-                                multi_vals.append(val)
+                            if val is not None:
+                                all_srcs_disabled = False
+                                if isinstance(val, list):
+                                    multi_vals.extend(val)
+                                else:
+                                    multi_vals.append(val)
                     if upstream_failed:
+                        break
+                    if all_srcs_disabled:
+                        upstream_disabled = True
                         break
                     raw_inputs[spec.id] = multi_vals
 
-            if upstream_failed:
-                node.error_message = "Upstream node error"
-                node.cached_outputs = {}
+            if upstream_failed or upstream_disabled:
+                if upstream_failed:
+                    node.error_message = "Upstream node error"
+                else:
+                    node.error_message = None
+                node.cached_outputs = {out.id: None for out in node.outputs}
+                node.is_dirty = False
                 continue
 
             try:

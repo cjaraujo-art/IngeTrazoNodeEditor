@@ -189,7 +189,7 @@ class ParametricRoofNode(BaseNode):
     title = "Parametric Roof"
     category = "Architecture"
     description = (
-        "Generates 3D watertight parametric roofs (Hip via Straight Skeleton, Gable, Shed, Flat, Mansard) "
+        "Generates 3D watertight parametric hip roofs via Straight Skeleton "
         "from any boundary contour or referenced face, with optional courtyard/interior holes.\n"
         "Supports both horizontal roofs and sloped/tilted 3D surfaces."
     )
@@ -199,19 +199,6 @@ class ParametricRoofNode(BaseNode):
         InputSpec("boundary", "Boundary / Face", SocketType.ANY, default=None, hide_widget=True),
         InputSpec("holes", "Courtyard Holes", SocketType.ANY, default=None, hide_widget=True),
         InputSpec("pitch", "Pitch / Slope (°)", SocketType.FLOAT, default=35.0, min_val=5.0, max_val=75.0, step=1.0),
-        InputSpec(
-            "style",
-            "Roof Style",
-            SocketType.INT,
-            default=0,
-            choices=[
-                "0: Hip (Straight Skeleton)",
-                "1: Gable",
-                "2: Shed / Mono-Pitch",
-                "3: Flat / Parapet",
-                "4: Mansard / Gambrel",
-            ],
-        ),
         InputSpec("overhang", "Overhang (m)", SocketType.FLOAT, default=0.4, min_val=0.0, max_val=2.0, step=0.05),
         InputSpec("thickness", "Thickness (m)", SocketType.FLOAT, default=0.25, min_val=0.05, max_val=1.0, step=0.05),
         InputSpec("elevation", "Elevation (m)", SocketType.FLOAT, default=0.0, step=0.5),
@@ -227,10 +214,10 @@ class ParametricRoofNode(BaseNode):
         boundary: Any,
         holes: Any = None,
         pitch: float = 35.0,
-        style: int = 0,
         overhang: float = 0.4,
         thickness: float = 0.25,
         elevation: float = 0.0,
+        style: int = 0,
     ) -> Dict[str, Any]:
         c_outer, c_holes, origin_3d, u_axis, v_axis, w_axis, base_z = _extract_rings(boundary, holes)
         slope_deg = max(5.0, min(80.0, float(pitch)))
