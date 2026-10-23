@@ -26,6 +26,7 @@ class CircleCurveNode(BaseNode):
 
     inputs = [
         InputSpec("radius", "Radius (m)", SocketType.FLOAT, default=2.0, min_val=0.01, step=0.1),
+        InputSpec("angle", "Angle (°)", SocketType.FLOAT, default=360.0, min_val=1.0, max_val=360.0, step=5.0),
         InputSpec("segments", "Segments", SocketType.INT, default=32, min_val=3, max_val=256, step=1),
         InputSpec("center", "Center", SocketType.VEC3, default=Vec3(0, 0, 0), hide_widget=True),
     ]
@@ -34,19 +35,33 @@ class CircleCurveNode(BaseNode):
         OutputSpec("face", "Face", SocketType.MESH),
     ]
 
-    def compute(self, radius: float, segments: int, center: Vec3) -> Dict[str, Any]:
+    def compute(self, radius: float, angle: float = 360.0, segments: int = 32, center: Vec3 = None) -> Dict[str, Any]:
         r = max(1e-4, float(radius))
+        ang_deg = float(angle) if angle is not None else 360.0
         n = max(3, int(segments))
         c = center or Vec3()
+
+        is_full_circle = abs(ang_deg) >= 360.0 or abs(ang_deg) < 1e-4
+
         pts: List[Vec3] = []
-        for i in range(n):
-            ang = 2.0 * math.pi * i / n
-            pts.append(Vec3(c.x + r * math.cos(ang), c.y + r * math.sin(ang), c.z))
-        curve = CurveData(points=pts, closed=True)
+        if is_full_circle:
+            for i in range(n):
+                ang = 2.0 * math.pi * i / n
+                pts.append(Vec3(c.x + r * math.cos(ang), c.y + r * math.sin(ang), c.z))
+            curve = CurveData(points=pts, closed=True)
+            face = curve.to_mesh_face("CircleFace")
+        else:
+            total_rad = math.radians(ang_deg)
+            for i in range(n + 1):
+                ang = total_rad * i / n
+                pts.append(Vec3(c.x + r * math.cos(ang), c.y + r * math.sin(ang), c.z))
+            curve = CurveData(points=pts, closed=False)
+            sector_curve = CurveData(points=[c] + pts, closed=True)
+            face = sector_curve.to_mesh_face("ArcFace")
+
         return {
             "curve": curve,
-            
-            "face": curve.to_mesh_face("CircleFace"),
+            "face": face,
         }
 
 
@@ -68,7 +83,6 @@ class RectangleCurveNode(BaseNode):
         InputSpec("center", "Center", SocketType.VEC3, default=Vec3(0, 0, 0), hide_widget=True),
     ]
     outputs = [
-        OutputSpec("curve", "Curve", SocketType.CURVE),
         OutputSpec("face", "Face", SocketType.MESH),
     ]
 
@@ -103,8 +117,6 @@ class RectangleCurveNode(BaseNode):
 
         curve = CurveData(points=pts, closed=True)
         return {
-            "curve": curve,
-            
             "face": curve.to_mesh_face("RectangleFace"),
         }
 
@@ -127,7 +139,6 @@ class EllipseCurveNode(BaseNode):
         InputSpec("center", "Center", SocketType.VEC3, default=Vec3(0, 0, 0), hide_widget=True),
     ]
     outputs = [
-        OutputSpec("curve", "Curve", SocketType.CURVE),
         OutputSpec("face", "Face", SocketType.MESH),
     ]
 
@@ -141,7 +152,7 @@ class EllipseCurveNode(BaseNode):
             ang = 2.0 * math.pi * i / n
             pts.append(Vec3(c.x + rx * math.cos(ang), c.y + ry * math.sin(ang), c.z))
         curve = CurveData(points=pts, closed=True)
-        return {"curve": curve, "face": curve.to_mesh_face("EllipseFace")}
+        return {"face": curve.to_mesh_face("EllipseFace")}
 
 
 # ============================================================================
@@ -161,7 +172,6 @@ class RegularPolygonCurveNode(BaseNode):
         InputSpec("center", "Center", SocketType.VEC3, default=Vec3(0, 0, 0), hide_widget=True),
     ]
     outputs = [
-        OutputSpec("curve", "Curve", SocketType.CURVE),
         OutputSpec("face", "Face", SocketType.MESH),
     ]
 
@@ -174,7 +184,7 @@ class RegularPolygonCurveNode(BaseNode):
             ang = 2.0 * math.pi * i / s
             pts.append(Vec3(c.x + r * math.cos(ang), c.y + r * math.sin(ang), c.z))
         curve = CurveData(points=pts, closed=True)
-        return {"curve": curve, "face": curve.to_mesh_face("PolygonFace")}
+        return {"face": curve.to_mesh_face("PolygonFace")}
 
 
 # ============================================================================
@@ -195,7 +205,6 @@ class StarCurveNode(BaseNode):
         InputSpec("center", "Center", SocketType.VEC3, default=Vec3(0, 0, 0), hide_widget=True),
     ]
     outputs = [
-        OutputSpec("curve", "Curve", SocketType.CURVE),
         OutputSpec("face", "Face", SocketType.MESH),
     ]
 
@@ -210,7 +219,7 @@ class StarCurveNode(BaseNode):
             r = r_out if (i % 2 == 0) else r_in
             pts.append(Vec3(c.x + r * math.cos(ang), c.y + r * math.sin(ang), c.z))
         curve = CurveData(points=pts, closed=True)
-        return {"curve": curve, "face": curve.to_mesh_face("StarFace")}
+        return {"face": curve.to_mesh_face("StarFace")}
 
 
 # ============================================================================
@@ -230,7 +239,6 @@ class SlotCapsuleCurveNode(BaseNode):
         InputSpec("center", "Center", SocketType.VEC3, default=Vec3(0, 0, 0), hide_widget=True),
     ]
     outputs = [
-        OutputSpec("curve", "Curve", SocketType.CURVE),
         OutputSpec("face", "Face", SocketType.MESH),
     ]
 
@@ -253,7 +261,7 @@ class SlotCapsuleCurveNode(BaseNode):
             pts.append(Vec3(c.x - d + r * math.cos(ang), c.y + r * math.sin(ang), c.z))
 
         curve = CurveData(points=pts, closed=True)
-        return {"curve": curve, "face": curve.to_mesh_face("SlotFace")}
+        return {"face": curve.to_mesh_face("SlotFace")}
 
 
 # ============================================================================
@@ -275,7 +283,6 @@ class LShapeCurveNode(BaseNode):
         InputSpec("center", "Center", SocketType.VEC3, default=Vec3(0, 0, 0), hide_widget=True),
     ]
     outputs = [
-        OutputSpec("curve", "Curve", SocketType.CURVE),
         OutputSpec("face", "Face", SocketType.MESH),
     ]
 
@@ -295,7 +302,7 @@ class LShapeCurveNode(BaseNode):
             Vec3(c.x, c.y + l, c.z),
         ]
         curve = CurveData(points=pts, closed=True)
-        return {"curve": curve, "face": curve.to_mesh_face("LShapeFace")}
+        return {"face": curve.to_mesh_face("LShapeFace")}
 
 
 # ============================================================================
@@ -317,7 +324,6 @@ class IShapeCurveNode(BaseNode):
         InputSpec("center", "Center", SocketType.VEC3, default=Vec3(0, 0, 0), hide_widget=True),
     ]
     outputs = [
-        OutputSpec("curve", "Curve", SocketType.CURVE),
         OutputSpec("face", "Face", SocketType.MESH),
     ]
 
@@ -347,7 +353,7 @@ class IShapeCurveNode(BaseNode):
             Vec3(c.x - hw, c.y - hh + tf, c.z),
         ]
         curve = CurveData(points=pts, closed=True)
-        return {"curve": curve, "face": curve.to_mesh_face("IBeamFace")}
+        return {"face": curve.to_mesh_face("IBeamFace")}
 
 
 # ============================================================================
@@ -441,7 +447,6 @@ class FaceFromPointsNode(BaseNode):
     ]
     outputs = [
         OutputSpec("face", "Face Mesh", SocketType.MESH),
-        OutputSpec("curve", "Outer Curve", SocketType.CURVE),
     ]
 
     def compute(self, points: Any, holes: Any = None) -> Dict[str, Any]:
@@ -460,7 +465,7 @@ class FaceFromPointsNode(BaseNode):
 
         outer_curve = CurveData(points=outer, closed=True)
         face_mesh = outer_curve.to_mesh_face("PlanarPolygonFace")
-        return {"face": face_mesh, "curve": outer_curve}
+        return {"face": face_mesh}
 
 # ============================================================================
 # 11. Curve / Surface Points Extraction Node

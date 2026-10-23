@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Automated unit test suite for the IngeTrazo Parametric Node Editor."""
 
+import math
 import os
 import sys
 import unittest
@@ -239,6 +240,25 @@ class TestArchitecturalNodes(unittest.TestCase):
         )
         wall_res = wall.compute(curve=rect_curve, thickness=0.25, height=3.0, elevation=0.0)
         self.assertGreater(len(wall_res["wall_mesh"].faces), 0)
+        self.assertTrue(wall_res["outer_curve"].closed)
+        self.assertTrue(wall_res["inner_curve"].closed)
+
+        # Test plugging Face (MeshData) directly into Wall node
+        circle_node = NODE_REGISTRY["curve.circle"]()
+        circle_face = circle_node.compute(radius=2.0, angle=360.0)["face"]
+        wall_from_face = wall.compute(curve=circle_face, thickness=0.25, height=3.0, elevation=0.0)
+        self.assertEqual(len(wall_from_face["outer_curve"].points), 32)
+        self.assertTrue(wall_from_face["outer_curve"].closed)
+        self.assertEqual(len(wall_from_face["wall_mesh"].faces), 32 * 4)  # 128 circular wall faces, not 16 fallback!
+
+        # Open arc wall: must stay open with end caps and not close the loop across the ends
+        arc_pts = [Vec3(2.0 * math.cos(math.radians(180.0 * i / 8)), 2.0 * math.sin(math.radians(180.0 * i / 8)), 0) for i in range(9)]
+        arc_curve = CurveData(points=arc_pts, closed=False)
+        arc_wall = wall.compute(curve=arc_curve, thickness=0.25, height=3.0, elevation=0.0)
+        arc_mesh = arc_wall["wall_mesh"]
+        self.assertFalse(arc_wall["outer_curve"].closed)
+        self.assertFalse(arc_wall["inner_curve"].closed)
+        self.assertEqual(len(arc_mesh.faces), 4 * (9 - 1) + 2)  # 34 faces: 8 outer, 8 inner, 8 top, 8 bottom + 2 end caps
 
         slab_cls = NODE_REGISTRY["arch.slab"]
         slab = slab_cls()
@@ -248,14 +268,31 @@ class TestArchitecturalNodes(unittest.TestCase):
     def test_curve_nodes(self):
         circle_cls = NODE_REGISTRY["curve.circle"]
         circle = circle_cls()
+        # Full 360 degree circle
         c_res = circle.compute(radius=3.0, segments=32, center=Vec3(0, 0, 0))
         self.assertEqual(len(c_res["curve"].points), 32)
+        self.assertTrue(c_res["curve"].closed)
         self.assertGreater(len(c_res["face"].faces), 0)
+
+        # 180 degree arc (outputs both curve and filled arc face)
+        arc_180 = circle.compute(radius=2.0, angle=180.0, segments=16, center=Vec3(0, 0, 0))
+        self.assertEqual(len(arc_180["curve"].points), 17)
+        self.assertFalse(arc_180["curve"].closed)
+        self.assertIsNotNone(arc_180["face"])
+        self.assertGreater(len(arc_180["face"].faces), 0)
+
+        # 90 degree arc
+        arc_90 = circle.compute(radius=1.0, angle=90.0, segments=8, center=Vec3(0, 0, 0))
+        self.assertEqual(len(arc_90["curve"].points), 9)
+        self.assertFalse(arc_90["curve"].closed)
+        self.assertAlmostEqual(arc_90["curve"].points[0].x, 1.0, places=4)
+        self.assertAlmostEqual(arc_90["curve"].points[-1].y, 1.0, places=4)
 
         star_cls = NODE_REGISTRY["curve.star"]
         star = star_cls()
         s_res = star.compute(inner_radius=1.0, outer_radius=2.0, points_count=5, center=Vec3(0, 0, 0))
-        self.assertEqual(len(s_res["curve"].points), 10)
+        self.assertEqual(len(s_res["face"].vertices), 10)
+        self.assertGreater(len(s_res["face"].faces), 0)
 
     def test_transform_nodes(self):
         extrude_cls = NODE_REGISTRY["solid.extrude"]

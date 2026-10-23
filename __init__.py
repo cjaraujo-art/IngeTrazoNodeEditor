@@ -19,12 +19,14 @@ try:
     from . import engine
     from . import ui_canvas
     from . import nodes
+    from . import i18n
 except (ImportError, ValueError):
     import core_types
     import node_base
     import engine
     import ui_canvas
     import nodes
+    import i18n
 
 # Alias modules in sys.modules so all imports inside node files and UI match
 sys.modules["core_types"] = core_types
@@ -32,6 +34,7 @@ sys.modules["node_base"] = node_base
 sys.modules["engine"] = engine
 sys.modules["ui_canvas"] = ui_canvas
 sys.modules["nodes"] = nodes
+sys.modules["i18n"] = i18n
 
 _pkg_name = __name__
 if _pkg_name:
@@ -40,6 +43,7 @@ if _pkg_name:
     sys.modules[f"{_pkg_name}.engine"] = engine
     sys.modules[f"{_pkg_name}.ui_canvas"] = ui_canvas
     sys.modules[f"{_pkg_name}.nodes"] = nodes
+    sys.modules[f"{_pkg_name}.i18n"] = i18n
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QVector3D
@@ -67,7 +71,7 @@ except Exception:
 
 PLUGIN = {
     "name": "IngeTrazo Parametric Node Editor",
-    "version": "1.1.0",
+    "version": "1.4.0",
     "author": "Community",
     "description": "Visual parametric node editor with Blender-style sliders, live viewport sync, and BIM tagging.",
 }

@@ -28,11 +28,19 @@ try:
     from .engine import GraphEngine, Wire
     from .node_base import BaseNode, InputSpec, NODE_REGISTRY
     from .nodes import discover_nodes
+    from .i18n import (
+        tr, get_available_languages, get_current_language,
+        get_current_language_meta, set_language, register_language_listener,
+    )
 except (ImportError, ValueError):
     from core_types import SOCKET_COLORS, SocketType
     from engine import GraphEngine, Wire
     from node_base import BaseNode, InputSpec, NODE_REGISTRY
     from nodes import discover_nodes
+    from i18n import (
+        tr, get_available_languages, get_current_language,
+        get_current_language_meta, set_language, register_language_listener,
+    )
 
 
 # ============================================================================
@@ -351,7 +359,7 @@ class BlenderValueSlider(QWidget):
         text_rect = QRectF(pad_x, 0.0, w - 2.0 * pad_x, h)
 
         painter.setPen(QColor(225, 230, 238))
-        painter.drawText(text_rect, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, self.label_text)
+        painter.drawText(text_rect, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, tr(self.label_text))
 
         val_font = QFont("Sans Serif", 8, QFont.Weight.DemiBold)
         painter.setFont(val_font)
@@ -406,6 +414,11 @@ class SocketItem(QGraphicsItem):
         self.color = QColor(r, g, b)
         self.setAcceptHoverEvents(True)
         self.hovered = False
+        self.setToolTip(f"{tr(self.label)} ({self.stype.name})")
+
+    def retranslate_ui(self) -> None:
+        self.setToolTip(f"{tr(self.label)} ({self.stype.name})")
+        self.update()
 
     def boundingRect(self) -> QRectF:
         r = self.RADIUS + 3.0
@@ -658,7 +671,7 @@ class NodeItem(QGraphicsItem):
         for btn_spec in action_buttons:
             y = self.HEADER_H + 15.0 + row_idx * self.ROW_H
             btn_id = btn_spec.get("id", f"btn_{row_idx}")
-            btn = QPushButton(btn_spec.get("label", "Action"))
+            btn = QPushButton(tr(btn_spec.get("label", "Action")))
             btn.setFixedSize(int(self.WIDTH - 24.0), 24)
             btn.setToolTip(btn_spec.get("tooltip", ""))
             color = btn_spec.get("color", "#2e7d32")
@@ -886,13 +899,49 @@ class NodeItem(QGraphicsItem):
         self.node.custom_title = clean if clean else None
         self.update()
 
+    def retranslate_ui(self) -> None:
+        self.setToolTip(tr(self.node.description or self.node.title))
+        for in_spec in self.node.inputs:
+            proxy = self.proxies.get(in_spec.id)
+            if proxy is not None:
+                w = proxy.widget()
+                if isinstance(w, QCheckBox):
+                    w.setText(tr(in_spec.label))
+                elif isinstance(w, BlenderValueSlider):
+                    w.update()
+                elif isinstance(w, QComboBox) and in_spec.choices:
+                    cur_idx = w.currentIndex()
+                    w.blockSignals(True)
+                    w.clear()
+                    w.addItems([tr(str(c)) for c in in_spec.choices])
+                    if 0 <= cur_idx < len(in_spec.choices):
+                        w.setCurrentIndex(cur_idx)
+                    w.blockSignals(False)
+        action_buttons = self.node.get_action_buttons() if hasattr(self.node, "get_action_buttons") else []
+        for btn_spec in action_buttons:
+            btn_id = btn_spec.get("id")
+            proxy = self.proxies.get(btn_id)
+            if proxy is not None:
+                btn = proxy.widget()
+                if isinstance(btn, QPushButton):
+                    btn.setText(tr(btn_spec.get("label", "Action")))
+        if hasattr(self, "_badge_label") and self._badge_label is not None:
+            if hasattr(self.node, "get_card_badge_text"):
+                txt = self.node.get_card_badge_text() or ""
+                self._badge_label.setText(tr(txt))
+        for sock in self.input_sockets.values():
+            sock.retranslate_ui()
+        for sock in self.output_sockets.values():
+            sock.retranslate_ui()
+        self.update()
+
     def _create_inline_widget(self, spec: InputSpec) -> Tuple[Optional[QWidget], float]:
         val = self.node.param_values.get(spec.id, spec.default)
         full_w = int(self.WIDTH - 24.0)
 
         if spec.choices is not None and len(spec.choices) > 0:
             combo = NodeComboBox()
-            combo.addItems([str(c) for c in spec.choices])
+            combo.addItems([tr(str(c)) for c in spec.choices])
 
             current_str = str(val)
             match_idx = -1
@@ -982,7 +1031,7 @@ class NodeItem(QGraphicsItem):
             return slider, 12.0
 
         if spec.type == SocketType.BOOL:
-            cb = QCheckBox(spec.label)
+            cb = QCheckBox(tr(spec.label))
             cb.setChecked(bool(val))
             base_dir = os.path.dirname(os.path.abspath(__file__))
             chk_icon = os.path.join(base_dir, "icons", "checkmark.png").replace("\\", "/")
@@ -1065,10 +1114,10 @@ class NodeItem(QGraphicsItem):
             self.setToolTip(self.node.error_message)
         elif self.isSelected():
             border_pen = QPen(QColor(246, 185, 59), 2.0)
-            self.setToolTip(self.node.description or self.node.title)
+            self.setToolTip(tr(self.node.description or self.node.title))
         else:
             border_pen = QPen(QColor(58, 64, 76), 1.2)
-            self.setToolTip(self.node.description or self.node.title)
+            self.setToolTip(tr(self.node.description or self.node.title))
 
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.setPen(border_pen)
@@ -1077,7 +1126,7 @@ class NodeItem(QGraphicsItem):
         title_w = self.WIDTH - 52.0 if self.has_preview_eye else self.WIDTH - 30.0
         painter.setPen(QColor(242, 245, 250))
         painter.setFont(QFont("Sans Serif", 9, QFont.Weight.Bold))
-        display_title = getattr(self.node, "custom_title", None) or self.node.title
+        display_title = getattr(self.node, "custom_title", None) or tr(self.node.title)
         painter.drawText(
             QRectF(12.0, 0.0, title_w, self.HEADER_H),
             Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
@@ -1123,7 +1172,7 @@ class NodeItem(QGraphicsItem):
             painter.drawText(
                 QRectF(12.0, self.height - 18.0, self.WIDTH - 24.0, 14.0),
                 Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
-                "MUTED",
+                tr("MUTED"),
             )
 
         painter.setFont(QFont("Sans Serif", 8))
@@ -1134,7 +1183,7 @@ class NodeItem(QGraphicsItem):
             painter.drawText(
                 QRectF(12.0, y - 10.0, self.WIDTH - 24.0, 20.0),
                 Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight,
-                out_spec.label,
+                tr(out_spec.label),
             )
 
         for in_spec in self.node.inputs:
@@ -1144,15 +1193,15 @@ class NodeItem(QGraphicsItem):
                 if in_spec.type in (SocketType.FLOAT, SocketType.INT, SocketType.BOOL):
                     continue
                 painter.drawText(
-                    QRectF(12.0, y - 10.0, 70.0, 20.0),
+                    QRectF(12.0, y - 10.0, 78.0, 20.0),
                     Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
-                    in_spec.label,
+                    tr(in_spec.label),
                 )
             else:
                 painter.drawText(
                     QRectF(12.0, y - 10.0, self.WIDTH - 24.0, 20.0),
                     Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
-                    in_spec.label,
+                    tr(in_spec.label),
                 )
 
 
@@ -1169,7 +1218,7 @@ class NodeSearchPopup(QDialog):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(6, 6, 6, 6)
         self.search_box = QLineEdit()
-        self.search_box.setPlaceholderText("🔍 Search nodes (type & press Enter)...")
+        self.search_box.setPlaceholderText(tr("🔍 Search nodes (type & press Enter)..."))
         self.search_box.setStyleSheet("background: #282c34; padding: 5px; border: 1px solid #3b4252;")
         self.list_widget = QListWidget()
         self.list_widget.setStyleSheet("background: #1e222a; border: none;")
@@ -1186,8 +1235,10 @@ class NodeSearchPopup(QDialog):
         self.list_widget.clear()
         q = query.strip().lower()
         for type_id, cls in sorted(NODE_REGISTRY.items(), key=lambda kv: (kv[1].category, kv[1].title)):
-            label = f"[{cls.category}]  {cls.title}"
-            if not q or q in label.lower() or q in type_id.lower():
+            tr_cat = tr(cls.category)
+            tr_title = tr(cls.title)
+            label = f"[{tr_cat}]  {tr_title}"
+            if not q or q in label.lower() or q in type_id.lower() or q in cls.title.lower() or q in cls.category.lower():
                 item = QListWidgetItem(label)
                 item.setIcon(get_node_icon(type_id, is_dark=True))
                 item.setData(Qt.ItemDataRole.UserRole, type_id)
@@ -1245,6 +1296,10 @@ class NodeCanvasScene(QGraphicsScene):
         for x in range(left, int(rect.right()), step):
             for y in range(top, int(rect.bottom()), step):
                 painter.drawPoint(x, y)
+
+    def retranslate_ui(self) -> None:
+        for it in self.node_items.values():
+            it.retranslate_ui()
 
     def spawn_node(self, type_id: str, pos: Tuple[float, float]) -> NodeItem:
         node = self.engine.add_node(type_id, pos=pos)
@@ -1627,36 +1682,38 @@ class NodeCanvasView(QGraphicsView):
         is_en = getattr(node, "is_enabled", True)
         is_prev = getattr(node, "is_preview_visible", True)
 
-        act_toggle = menu.addAction(f"⏻ {'Disable Node (Mute)' if is_en else 'Enable Node'} (D)")
+        toggle_label = tr("Disable Node (Mute)") if is_en else tr("Enable Node")
+        act_toggle = menu.addAction(f"⏻ {toggle_label} (D)")
         act_toggle.triggered.connect(self.toggle_selected_enable)
 
-        act_prev = menu.addAction(f"👁 {'Hide Viewport Preview' if is_prev else 'Show Viewport Preview'} (V)")
+        prev_label = tr("Hide Viewport Preview") if is_prev else tr("Show Viewport Preview")
+        act_prev = menu.addAction(f"👁 {prev_label} (V)")
         act_prev.triggered.connect(self.toggle_selected_preview)
 
         if node.is_output_node or any(out.type == SocketType.MESH for out in node.outputs):
-            act_bake = menu.addAction("🥐 Bake This Node to Scene")
+            act_bake = menu.addAction(tr("🥐 Bake This Node to Scene"))
             act_bake.triggered.connect(lambda: self.canvas_scene.request_bake(node))
 
         menu.addSeparator()
 
-        act_copy = menu.addAction("📄 Copy Node(s) (Ctrl+C)")
+        act_copy = menu.addAction(tr("📄 Copy Node(s) (Ctrl+C)"))
         act_copy.triggered.connect(self.copy_selected)
 
-        act_cut = menu.addAction("✂ Cut Node(s) (Ctrl+X)")
+        act_cut = menu.addAction(tr("✂ Cut Node(s) (Ctrl+X)"))
         act_cut.triggered.connect(self.cut_selected)
 
-        act_dup = menu.addAction("📑 Duplicate Node(s) (Ctrl+D)")
+        act_dup = menu.addAction(tr("📑 Duplicate Node(s) (Ctrl+D)"))
         act_dup.triggered.connect(self.duplicate_selected)
 
-        act_del = menu.addAction("🗑 Delete Node(s) (Del)")
+        act_del = menu.addAction(tr("🗑 Delete Node(s) (Del)"))
         act_del.triggered.connect(self.delete_selected)
 
         menu.addSeparator()
 
-        act_up = menu.addAction("🎯 Select Connected Upstream")
+        act_up = menu.addAction(tr("🎯 Select Connected Upstream"))
         act_up.triggered.connect(lambda: self._select_connected(node.id, upstream=True))
 
-        act_down = menu.addAction("🎯 Select Connected Downstream")
+        act_down = menu.addAction(tr("🎯 Select Connected Downstream"))
         act_down.triggered.connect(lambda: self._select_connected(node.id, upstream=False))
 
         menu.exec(global_pos)
@@ -1689,26 +1746,26 @@ class NodeCanvasView(QGraphicsView):
 
         scene_pt = self.mapToScene(view_pt)
 
-        act_add = menu.addAction("➕ Add Node... (Space / Tab)")
+        act_add = menu.addAction(tr("➕ Add Node... (Space / Tab)"))
         act_add.triggered.connect(lambda: self.open_search_popup(view_pt))
 
         cb_text = QApplication.clipboard().text()
         has_nodes = bool(cb_text and cb_text.startswith("{") and "nodes" in cb_text)
 
-        act_paste = menu.addAction("📋 Paste Nodes (Ctrl+V)")
+        act_paste = menu.addAction(tr("📋 Paste Nodes (Ctrl+V)"))
         act_paste.setEnabled(has_nodes)
         act_paste.triggered.connect(lambda: self.paste_at_pos(scene_pt))
 
         menu.addSeparator()
 
-        act_sel_all = menu.addAction("Select All (Ctrl+A)")
+        act_sel_all = menu.addAction(tr("Select All (Ctrl+A)"))
         act_sel_all.triggered.connect(self.select_all)
 
         if self.parent_editor is not None:
-            act_reload = menu.addAction("🔄 Reload Nodes Catalog")
+            act_reload = menu.addAction(tr("🔄 Reload Nodes Catalog"))
             act_reload.triggered.connect(self.parent_editor._hot_reload_nodes)
 
-        act_fit = menu.addAction("📐 Fit All in View (F)")
+        act_fit = menu.addAction(tr("🔎 Fit All in View (F)"))
         act_fit.triggered.connect(self.fit_view)
 
         menu.exec(global_pos)
@@ -2085,17 +2142,19 @@ class NodeInspectorPanel(QWidget):
         header_layout.setContentsMargins(10, 6, 6, 6)
         header_layout.setSpacing(6)
 
-        lbl_title = QLabel("📋 Node Properties")
+        lbl_title = QLabel(tr("📋 Node Properties"))
         lbl_title.setObjectName("inspector_title")
         lbl_title.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
         header_layout.addWidget(lbl_title, 1)
+        self.lbl_title = lbl_title
 
         btn_close = QPushButton("✕")
         btn_close.setObjectName("inspector_close")
-        btn_close.setToolTip("Collapse properties panel")
+        btn_close.setToolTip(tr("Collapse properties panel"))
         btn_close.setFixedSize(22, 22)
         btn_close.clicked.connect(self.close_panel)
         header_layout.addWidget(btn_close, 0)
+        self.btn_close = btn_close
 
         outer_layout.addWidget(header_bar)
 
@@ -2206,6 +2265,16 @@ class NodeInspectorPanel(QWidget):
             }
         """)
 
+    def retranslate_ui(self) -> None:
+        if hasattr(self, "lbl_title"):
+            self.lbl_title.setText(tr("📋 Node Properties"))
+        if hasattr(self, "btn_close"):
+            self.btn_close.setToolTip(tr("Collapse properties panel"))
+        if self.current_node and self.current_node_item and self.current_scene:
+            self.populate(self.current_node, self.current_node_item, self.current_scene)
+        else:
+            self.clear_and_show_placeholder()
+
     def close_panel(self) -> None:
         p = getattr(self, "parent_editor", None) or self.parent()
         while p is not None:
@@ -2231,12 +2300,12 @@ class NodeInspectorPanel(QWidget):
         icon_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         lay.addWidget(icon_lbl)
 
-        title_lbl = QLabel("No Node Selected")
+        title_lbl = QLabel(tr("No Node Selected"))
         title_lbl.setStyleSheet("font-size: 12px; font-weight: bold; color: #d8dee9; background: transparent;")
         title_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         lay.addWidget(title_lbl)
 
-        desc_lbl = QLabel("Select a node on canvas to inspect parameters and sliders.")
+        desc_lbl = QLabel(tr("Select a node on canvas to inspect parameters and sliders."))
         desc_lbl.setStyleSheet("font-size: 10px; color: #7f8c98; background: transparent;")
         desc_lbl.setWordWrap(True)
         desc_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -2262,12 +2331,12 @@ class NodeInspectorPanel(QWidget):
         icon_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         lay.addWidget(icon_lbl)
 
-        title_lbl = QLabel(f"{count} Nodes Selected")
+        title_lbl = QLabel(f"{count} {tr('Nodes Selected')}")
         title_lbl.setStyleSheet("font-size: 12px; font-weight: bold; color: #d8dee9; background: transparent;")
         title_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         lay.addWidget(title_lbl)
 
-        desc_lbl = QLabel("Select a single node to configure its parameters.")
+        desc_lbl = QLabel(tr("Select a single node to configure its parameters."))
         desc_lbl.setStyleSheet("font-size: 10px; color: #7f8c98; background: transparent;")
         desc_lbl.setWordWrap(True)
         desc_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -2312,7 +2381,8 @@ class NodeInspectorPanel(QWidget):
         lay.setContentsMargins(6, 6, 6, 6)
         lay.setSpacing(4)
 
-        lbl_type = QLabel(f"<b>Type:</b> {node.title} <span style='color: #88c0d0;'>({node.category})</span>")
+        display_t = getattr(node, "custom_title", None) or tr(node.title)
+        lbl_type = QLabel(f"<b>{tr('Type:')}</b> {display_t} <span style='color: #88c0d0;'>({tr(node.category)})</span>")
         lbl_type.setTextFormat(Qt.TextFormat.RichText)
         lbl_type.setWordWrap(True)
         lbl_type.setStyleSheet("background: transparent; color: #eceff4; font-size: 11px;")
@@ -2320,12 +2390,12 @@ class NodeInspectorPanel(QWidget):
 
         nick_lay = QHBoxLayout()
         nick_lay.setSpacing(4)
-        lbl_nick = QLabel("Nick:")
+        lbl_nick = QLabel(tr("Nick:"))
         lbl_nick.setStyleSheet("background: transparent; color: #abb2bf; font-weight: 500;")
         lbl_nick.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Preferred)
 
         le_nick = QLineEdit(getattr(node, "custom_title", None) or "")
-        le_nick.setPlaceholderText(node.title)
+        le_nick.setPlaceholderText(display_t)
         le_nick.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         le_nick.setMinimumWidth(30)
 
@@ -2340,7 +2410,7 @@ class NodeInspectorPanel(QWidget):
         lay.addLayout(nick_lay)
 
         if node.description:
-            lbl_desc = QLabel(node.description)
+            lbl_desc = QLabel(tr(node.description))
             lbl_desc.setWordWrap(True)
             lbl_desc.setStyleSheet("color: #7f8c98; font-size: 10px; background: transparent;")
             lay.addWidget(lbl_desc)
@@ -2348,7 +2418,7 @@ class NodeInspectorPanel(QWidget):
         self.content_layout.addWidget(card)
 
     def _build_color_picker_card(self, node: BaseNode, node_item: NodeItem) -> None:
-        group = QGroupBox("🎨 Color Swatch & Picker")
+        group = QGroupBox(tr("🎨 Color Picker & Palette"))
         lay = QVBoxLayout(group)
         lay.setContentsMargins(6, 8, 6, 6)
         lay.setSpacing(4)
@@ -2360,7 +2430,7 @@ class NodeInspectorPanel(QWidget):
         lum = 0.299 * r + 0.587 * g + 0.114 * b
         text_col = "#111111" if lum > 0.55 else "#ffffff"
 
-        btn_color = QPushButton(f"Pick Color ({hex_col})")
+        btn_color = QPushButton(f"{tr('Select Color')} ({hex_col})")
         btn_color.setFixedHeight(26)
         btn_color.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         btn_color.setStyleSheet(f"""
@@ -2379,7 +2449,7 @@ class NodeInspectorPanel(QWidget):
 
         def _on_pick():
             curr_qcol = QColor.fromRgbF(min(1.0, max(0.0, r)), min(1.0, max(0.0, g)), min(1.0, max(0.0, b)))
-            color = QColorDialog.getColor(curr_qcol, self, "Select Node Color")
+            color = QColorDialog.getColor(curr_qcol, self, tr("Select Node Color"))
             if color.isValid():
                 new_r = round(color.redF(), 3)
                 new_g = round(color.greenF(), 3)
@@ -2410,7 +2480,7 @@ class NodeInspectorPanel(QWidget):
         card_lay.setSpacing(4)
 
         header_row = QHBoxLayout()
-        lbl_name = QLabel(in_spec.label)
+        lbl_name = QLabel(tr(in_spec.label))
         lbl_name.setStyleSheet("font-weight: bold; color: #88c0d0; background: transparent;")
         lbl_name.setWordWrap(True)
         tag_name = QLabel("Int" if is_int else "Float")
@@ -2425,7 +2495,7 @@ class NodeInspectorPanel(QWidget):
         grid.setColumnStretch(3, 1)
 
         # Min
-        grid.addWidget(QLabel("Min:"), 0, 0)
+        grid.addWidget(QLabel(tr("Min:")), 0, 0)
         spin_min = QSpinBox() if is_int else QDoubleSpinBox()
         spin_min.setRange(-1000000, 1000000)
         spin_min.setMinimumWidth(30)
@@ -2437,7 +2507,7 @@ class NodeInspectorPanel(QWidget):
         grid.addWidget(spin_min, 0, 1)
 
         # Max
-        grid.addWidget(QLabel("Max:"), 0, 2)
+        grid.addWidget(QLabel(tr("Max:")), 0, 2)
         spin_max = QSpinBox() if is_int else QDoubleSpinBox()
         spin_max.setRange(-1000000, 1000000)
         spin_max.setMinimumWidth(30)
@@ -2450,7 +2520,7 @@ class NodeInspectorPanel(QWidget):
 
         # Decimals & Step
         if not is_int:
-            grid.addWidget(QLabel("Dec:"), 1, 0)
+            grid.addWidget(QLabel(tr("Dec:")), 1, 0)
             spin_dec = QSpinBox()
             spin_dec.setRange(0, 6)
             spin_dec.setMinimumWidth(30)
@@ -2459,7 +2529,7 @@ class NodeInspectorPanel(QWidget):
             spin_dec.setValue(dec)
             grid.addWidget(spin_dec, 1, 1)
 
-            grid.addWidget(QLabel("Step:"), 1, 2)
+            grid.addWidget(QLabel(tr("Step:")), 1, 2)
             spin_step = QDoubleSpinBox()
             spin_step.setRange(0.0001, 1000.0)
             spin_step.setDecimals(4)
@@ -2469,7 +2539,7 @@ class NodeInspectorPanel(QWidget):
             spin_step.setValue(step_v)
             grid.addWidget(spin_step, 1, 3)
         else:
-            grid.addWidget(QLabel("Step:"), 1, 0)
+            grid.addWidget(QLabel(tr("Step:")), 1, 0)
             spin_step = QSpinBox()
             spin_step.setRange(1, 1000)
             spin_step.setMinimumWidth(30)
@@ -2480,7 +2550,7 @@ class NodeInspectorPanel(QWidget):
             spin_dec = None
 
         # Value
-        grid.addWidget(QLabel("Val:"), 2, 0)
+        grid.addWidget(QLabel(tr("Val:")), 2, 0)
         spin_val = QSpinBox() if is_int else QDoubleSpinBox()
         spin_val.setRange(spin_min.value(), spin_max.value())
         spin_val.setMinimumWidth(30)
@@ -2613,7 +2683,7 @@ class NodeInspectorPanel(QWidget):
         if not node.inputs:
             return
 
-        group = QGroupBox("⚙️ Sliders & Limits")
+        group = QGroupBox(tr("⚙️ Sliders & Limits"))
         lay = QVBoxLayout(group)
         lay.setContentsMargins(6, 10, 6, 6)
         lay.setSpacing(6)
@@ -2634,7 +2704,7 @@ class NodeInspectorPanel(QWidget):
                 card_lay.setContentsMargins(6, 6, 6, 6)
                 card_lay.setSpacing(4)
 
-                lbl = QLabel(in_spec.label + ":")
+                lbl = QLabel(tr(in_spec.label) + ":")
                 lbl.setStyleSheet("color: #abb2bf; font-weight: bold; background: transparent;")
                 lbl.setWordWrap(True)
 
@@ -2662,7 +2732,7 @@ class NodeInspectorPanel(QWidget):
 
             elif in_spec.type == SocketType.BOOL:
                 has_any_param = True
-                chk = QCheckBox(in_spec.label)
+                chk = QCheckBox(tr(in_spec.label))
                 chk.setChecked(bool(node.param_values.get(in_spec.id, in_spec.default)))
                 base_dir = os.path.dirname(os.path.abspath(__file__))
                 chk_icon = os.path.join(base_dir, "icons", "checkmark.png").replace("\\", "/")
@@ -2733,7 +2803,7 @@ class NodeInspectorPanel(QWidget):
         if not action_buttons:
             return
 
-        group = QGroupBox("⚡ Node Actions")
+        group = QGroupBox(tr("⚡ Node Actions"))
         lay = QVBoxLayout(group)
         lay.setContentsMargins(6, 10, 6, 6)
         lay.setSpacing(4)
@@ -2787,18 +2857,24 @@ class RibbonIconButton(QToolButton):
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setAutoRaise(True)
 
-        title = getattr(node_cls, "title", self.type_id)
-        desc = getattr(node_cls, "description", "") or "No description available."
-        cat = getattr(node_cls, "category", "")
+        self._raw_title = getattr(node_cls, "title", self.type_id)
+        self._raw_desc = getattr(node_cls, "description", "") or "No description available."
+        self._raw_cat = getattr(node_cls, "category", "")
+        self.retranslate_ui()
+
+        self.update_icon(is_dark)
+        self.clicked.connect(lambda: self.on_click(self.type_id))
+
+    def retranslate_ui(self) -> None:
+        title = tr(self._raw_title)
+        desc = tr(self._raw_desc)
+        cat = tr(self._raw_cat)
         self.setToolTip(
             f"<div style='font-family: Segoe UI, sans-serif; font-size: 11px;'>"
             f"<b>{title}</b> <span style='color: #888;'>({cat})</span><br/>"
             f"<span style='color: #61afef; font-family: monospace;'>{self.type_id}</span><hr style='margin:3px 0;'/>"
             f"{desc}</div>"
         )
-
-        self.update_icon(is_dark)
-        self.clicked.connect(lambda: self.on_click(self.type_id))
 
     def update_icon(self, is_dark: bool) -> None:
         self.is_dark = is_dark
@@ -2902,7 +2978,17 @@ class NodeRibbonBar(QWidget):
             scroll.setWidget(container)
             page_layout.addWidget(scroll)
 
-            self.tab_widget.addTab(page, cat)
+            page._orig_category = cat
+            self.tab_widget.addTab(page, tr(cat))
+
+    def retranslate_ui(self) -> None:
+        for idx in range(self.tab_widget.count()):
+            page = self.tab_widget.widget(idx)
+            orig_cat = getattr(page, "_orig_category", None)
+            if orig_cat:
+                self.tab_widget.setTabText(idx, tr(orig_cat))
+        for btn in self.buttons:
+            btn.retranslate_ui()
 
     def apply_theme(self, is_dark: bool) -> None:
         self.is_dark = is_dark
@@ -3064,9 +3150,9 @@ class NodeEditorWidget(QWidget):
 
     def _update_popout_button(self, is_floating: bool) -> None:
         if hasattr(self, "btn_popout"):
-            self.btn_popout.setText("⇲ Dock Tab" if is_floating else "⧉ Pop out")
+            self.btn_popout.setText(tr("⇲ Dock Tab") if is_floating else tr("⧉ Pop out"))
             self.btn_popout.setToolTip(
-                "Dock back as a side tray tab" if is_floating else "Pop out into a separate floating window"
+                tr("Dock back as a side tray tab") if is_floating else tr("Pop out into a separate floating window")
             )
 
     def _toggle_popout(self) -> None:
@@ -3117,7 +3203,7 @@ class NodeEditorWidget(QWidget):
         bar_layout.setSpacing(5)
 
         self.btn_ribbon_toggle = QPushButton("▲")
-        self.btn_ribbon_toggle.setToolTip("Toggle Component Shelf (Grasshopper Ribbon)")
+        self.btn_ribbon_toggle.setToolTip(tr("Toggle Component Shelf (Grasshopper Ribbon)"))
         self.btn_ribbon_toggle.setStyleSheet("""
             QPushButton {
                 background: #2c313a;
@@ -3134,44 +3220,65 @@ class NodeEditorWidget(QWidget):
             }
         """)
 
-        self.btn_add = QPushButton("➕ Add")
-        self.btn_add.setToolTip("Add Node (Space or Tab)")
-        btn_reload = QPushButton("🔄")
-        btn_reload.setToolTip("Reload Nodes catalog")
-        self.chk_live = QCheckBox("🔴 Live")
-        self.chk_live.setToolTip("Live Viewport Sync (60 FPS)")
+        self.btn_add = QPushButton(tr("➕ Add"))
+        self.btn_add.setToolTip(tr("Add Node (Space or Tab)"))
+        self.btn_reload = QPushButton("🔄")
+        self.btn_reload.setToolTip(tr("Reload Nodes catalog"))
+        self.chk_live = QCheckBox(tr("🔴 Live"))
+        self.chk_live.setToolTip(tr("Live Viewport Sync (60 FPS)"))
         self.chk_live.setStyleSheet("color: #e5c07b; font-size: 11px;")
         self.chk_live.setChecked(True)
 
-        btn_bake = QPushButton("🥐 Bake")
-        btn_bake.setToolTip("Bake current solids to IngeTrazo Scene")
-        btn_bake.setStyleSheet("background: #2e7d32; color: white; font-weight: bold; border-radius: 4px; padding: 3px 9px;")
+        self.btn_bake = QPushButton(tr("🥐 Bake"))
+        self.btn_bake.setToolTip(tr("Bake current solids to IngeTrazo Scene"))
+        self.btn_bake.setStyleSheet("background: #2e7d32; color: white; font-weight: bold; border-radius: 4px; padding: 3px 9px;")
 
-        btn_save = QPushButton("💾")
-        btn_save.setToolTip("Save Graph (.itgraph / .json)")
-        btn_load = QPushButton("📂")
-        btn_load.setToolTip("Load Graph from file")
+        self.btn_save = QPushButton("💾")
+        self.btn_save.setToolTip(tr("Save Graph (.itgraph / .json)"))
+        self.btn_load = QPushButton("📂")
+        self.btn_load.setToolTip(tr("Load Graph from file"))
 
-        btn_load_group = QPushButton("📥 From Group")
-        btn_load_group.setToolTip("Load embedded graph from selected IngeTrazo Group")
+        self.btn_load_group = QPushButton(tr("📥 From Group"))
+        self.btn_load_group.setToolTip(tr("Load embedded graph from selected IngeTrazo Group"))
 
-        self.btn_popout = QPushButton("⧉ Pop out")
-        self.btn_popout.setToolTip("Pop out into separate window / Dock as tab")
+        self.btn_popout = QPushButton(tr("⧉ Pop out"))
+        self.btn_popout.setToolTip(tr("Pop out into separate window / Dock as tab"))
         self.btn_popout.setStyleSheet("background: #3b4252; color: #61afef; border-radius: 4px; padding: 3px 7px;")
 
-        self.btn_fit = QPushButton("📐 Fit")
-        self.btn_fit.setToolTip("Fit all nodes in view (F)")
+        self.btn_fit = QPushButton(tr("🔎 Fit"))
+        self.btn_fit.setToolTip(tr("Fit all nodes in view (F)"))
         self.btn_fit.setStyleSheet("background: #2c313a; color: #88c0d0; border-radius: 4px; padding: 3px 7px;")
 
-        self.lbl_status = QLabel("Ready")
+        meta = get_current_language_meta()
+        self.btn_lang = QPushButton(f"{meta.get('flag', '🌐')} {meta.get('code', 'en').upper()} ▾")
+        self.btn_lang.setToolTip(tr("Change Language"))
+        self.btn_lang.setStyleSheet("""
+            QPushButton {
+                background: #2c313a;
+                color: #e5c07b;
+                font-weight: 500;
+                border: 1px solid #3e4451;
+                border-radius: 4px;
+                padding: 3px 7px;
+                font-size: 11px;
+            }
+            QPushButton:hover {
+                background: #3e4451;
+                color: #ffffff;
+                border-color: #e5c07b;
+            }
+        """)
+
+        self.lbl_status = QLabel(tr("Ready"))
         self.lbl_status.setStyleSheet("color: #98c379; font-size: 11px;")
 
         bar_layout.addWidget(self.btn_ribbon_toggle)
-        for b in (self.btn_add, btn_reload, btn_bake, btn_save, btn_load, btn_load_group):
+        for b in (self.btn_add, self.btn_reload, self.btn_bake, self.btn_save, self.btn_load, self.btn_load_group):
             bar_layout.addWidget(b)
         bar_layout.addWidget(self.chk_live)
         bar_layout.addWidget(self.btn_popout)
         bar_layout.addWidget(self.btn_fit)
+        bar_layout.addWidget(self.btn_lang)
         bar_layout.addStretch(1)
         bar_layout.addWidget(self.lbl_status)
 
@@ -3220,21 +3327,23 @@ class NodeEditorWidget(QWidget):
 
         self.btn_ribbon_toggle.clicked.connect(self._toggle_ribbon)
         self.btn_add.clicked.connect(self._open_search_under_button)
-        btn_reload.clicked.connect(self._hot_reload_nodes)
+        self.btn_reload.clicked.connect(self._hot_reload_nodes)
         self.chk_live.toggled.connect(self.on_live_toggled)
-        btn_bake.clicked.connect(lambda: self.on_bake(None))
-        btn_save.clicked.connect(self._save_graph)
-        btn_load.clicked.connect(self._load_graph)
-        btn_load_group.clicked.connect(self._handle_load_from_group)
+        self.btn_bake.clicked.connect(lambda: self.on_bake(None))
+        self.btn_save.clicked.connect(self._save_graph)
+        self.btn_load.clicked.connect(self._load_graph)
+        self.btn_load_group.clicked.connect(self._handle_load_from_group)
         self.btn_popout.clicked.connect(self._toggle_popout)
         self.btn_fit.clicked.connect(self.view.fit_view)
+        self.btn_lang.clicked.connect(self._open_language_menu)
+        register_language_listener(lambda code: self.retranslate_ui())
         self.scene.selectionChanged.connect(self._on_scene_selection_changed)
 
     def _toggle_ribbon(self) -> None:
         is_hidden = self.ribbon.isHidden()
         self.ribbon.setVisible(is_hidden)
         self.btn_ribbon_toggle.setText("▲" if is_hidden else "▼")
-        self.btn_ribbon_toggle.setToolTip("Hide Component Shelf" if is_hidden else "Show Component Shelf")
+        self.btn_ribbon_toggle.setToolTip(tr("Hide Component Shelf") if is_hidden else tr("Show Component Shelf"))
 
     def _spawn_node_from_ribbon(self, type_id: str) -> None:
         view_rect = self.view.viewport().rect()
@@ -3321,13 +3430,90 @@ class NodeEditorWidget(QWidget):
         else:
             self.lbl_status.setText(f"✅ {len(NODE_REGISTRY)} nodes registered")
 
+    def _open_language_menu(self) -> None:
+        menu = QMenu(self)
+        menu.setStyleSheet("""
+            QMenu {
+                background-color: #21252b;
+                color: #abb2bf;
+                border: 1px solid #3e4451;
+                border-radius: 6px;
+                padding: 4px;
+                font-size: 11px;
+            }
+            QMenu::item {
+                padding: 6px 20px 6px 12px;
+                border-radius: 4px;
+            }
+            QMenu::item:selected {
+                background-color: #2c313a;
+                color: #ffffff;
+            }
+        """)
+        cur_lang = get_current_language()
+        for lang in get_available_languages():
+            flag = lang.get("flag", "🌐")
+            name = lang.get("native", lang.get("name", lang["code"]))
+            code = lang["code"]
+            is_cur = (code == cur_lang)
+            prefix = "✓ " if is_cur else "   "
+            action = menu.addAction(f"{prefix}{flag}  {name} ({code.upper()})")
+            action.triggered.connect(lambda checked=False, c=code: self._switch_language(c))
+
+        btn_rect = self.btn_lang.rect()
+        global_pt = self.btn_lang.mapToGlobal(btn_rect.bottomLeft())
+        menu.exec(global_pt)
+
+    def _switch_language(self, code: str) -> None:
+        set_language(code)
+        self.retranslate_ui()
+
+    def retranslate_ui(self) -> None:
+        meta = get_current_language_meta()
+        self.btn_lang.setText(f"{meta.get('flag', '🌐')} {meta.get('code', 'en').upper()} ▾")
+        self.btn_lang.setToolTip(tr("Change Language"))
+
+        is_hidden = self.ribbon.isHidden() if hasattr(self, "ribbon") else False
+        self.btn_ribbon_toggle.setToolTip(tr("Hide Component Shelf") if is_hidden else tr("Show Component Shelf"))
+        self.btn_add.setText(tr("➕ Add"))
+        self.btn_add.setToolTip(tr("Add Node (Space or Tab)"))
+        self.btn_reload.setToolTip(tr("Reload Nodes catalog"))
+        self.chk_live.setText(tr("🔴 Live"))
+        self.chk_live.setToolTip(tr("Live Viewport Sync (60 FPS)"))
+        self.btn_bake.setText(tr("🥐 Bake"))
+        self.btn_bake.setToolTip(tr("Bake current solids to IngeTrazo Scene"))
+        self.btn_save.setToolTip(tr("Save Graph (.itgraph / .json)"))
+        self.btn_load.setToolTip(tr("Load Graph from file"))
+        self.btn_load_group.setText(tr("📥 From Group"))
+        self.btn_load_group.setToolTip(tr("Load embedded graph from selected IngeTrazo Group"))
+        self.btn_fit.setText(tr("🔎 Fit"))
+        self.btn_fit.setToolTip(tr("Fit all nodes in view (F)"))
+
+        if hasattr(self, "_dock") and self._dock is not None:
+            self._update_popout_button(self._dock.isFloating() if hasattr(self._dock, "isFloating") else False)
+        else:
+            self.btn_popout.setText(tr("⧉ Pop out"))
+            self.btn_popout.setToolTip(tr("Pop out into separate window / Dock as tab"))
+
+        if self.lbl_status.text() in ("Ready", "Prêt"):
+            self.lbl_status.setText(tr("Ready"))
+
+        if hasattr(self, "ribbon"):
+            self.ribbon.retranslate_ui()
+
+        if hasattr(self, "inspector"):
+            self.inspector.retranslate_ui()
+
+        if hasattr(self, "scene"):
+            self.scene.retranslate_ui()
+
     def _save_graph(self) -> None:
-        path, _ = QFileDialog.getSaveFileName(self, "Save Node Graph", "", "IngeTrazo Graph (*.itgraph *.json)")
+        path, _ = QFileDialog.getSaveFileName(self, tr("Save Node Graph"), "", tr("IngeTrazo Graph (*.itgraph *.json)"))
         if path:
             self.engine.save_file(path)
 
     def _load_graph(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(self, "Load Node Graph", "", "IngeTrazo Graph (*.itgraph *.json)")
+        path, _ = QFileDialog.getOpenFileName(self, tr("Load Node Graph"), "", tr("IngeTrazo Graph (*.itgraph *.json)"))
         if path:
             self.engine.load_file(path)
             self.scene.rebuild_from_engine()

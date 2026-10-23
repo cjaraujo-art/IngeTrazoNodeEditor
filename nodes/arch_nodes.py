@@ -13,40 +13,78 @@ except (ImportError, ValueError):
     from node_base import BaseNode, InputSpec, OutputSpec, register_node
 
 
-def _offset_points(pts: List[Vec3], dist: float) -> List[Vec3]:
-    """Offsets a 2D/3D polygon horizontally by `dist`."""
+def _offset_points(pts: List[Vec3], dist: float, is_closed: bool = True) -> List[Vec3]:
+    """Offsets a 2D/3D polyline or polygon horizontally by `dist`."""
     n = len(pts)
-    if n < 3 or abs(dist) < 1e-4:
-        return [Vec3(p.x, p.y, p.z) for p in pts]
-    lines = []
-    for i in range(n):
-        p1 = pts[i]
-        p2 = pts[(i + 1) % n]
-        dx = p2.x - p1.x
-        dy = p2.y - p1.y
-        length = math.hypot(dx, dy)
-        if length < 1e-6:
-            continue
-        nx = dy / length * dist
-        ny = -dx / length * dist
-        lines.append(((p1.x + nx, p1.y + ny), (p2.x + nx, p2.y + ny)))
-
-    m = len(lines)
-    if m < 3:
+    if n < 2 or abs(dist) < 1e-4:
         return [Vec3(p.x, p.y, p.z) for p in pts]
 
-    out: List[Vec3] = []
-    for i in range(m):
-        (x1, y1), (x2, y2) = lines[i]
-        (x3, y3), (x4, y4) = lines[(i + 1) % m]
-        denom = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4)
-        z = pts[i].z
-        if abs(denom) < 1e-6:
-            out.append(Vec3(x2, y2, z))
-        else:
-            t = ((x1 - x3) * (y3 - y4) - (y1 - y3) * (x3 - x4)) / denom
-            out.append(Vec3(x1 + t * (x2 - x1), y1 + t * (y2 - y1), z))
-    return out
+    if is_closed and n >= 3:
+        lines = []
+        for i in range(n):
+            p1 = pts[i]
+            p2 = pts[(i + 1) % n]
+            dx = p2.x - p1.x
+            dy = p2.y - p1.y
+            length = math.hypot(dx, dy)
+            if length < 1e-6:
+                continue
+            nx = dy / length * dist
+            ny = -dx / length * dist
+            lines.append(((p1.x + nx, p1.y + ny), (p2.x + nx, p2.y + ny)))
+
+        m = len(lines)
+        if m < 3:
+            return [Vec3(p.x, p.y, p.z) for p in pts]
+
+        out: List[Vec3] = []
+        for i in range(m):
+            (x1, y1), (x2, y2) = lines[i]
+            (x3, y3), (x4, y4) = lines[(i + 1) % m]
+            denom = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4)
+            z = pts[i].z
+            if abs(denom) < 1e-6:
+                out.append(Vec3(x2, y2, z))
+            else:
+                t = ((x1 - x3) * (y3 - y4) - (y1 - y3) * (x3 - x4)) / denom
+                out.append(Vec3(x1 + t * (x2 - x1), y1 + t * (y2 - y1), z))
+        return out
+    else:
+        # Open polyline offset
+        lines = []
+        for i in range(n - 1):
+            p1 = pts[i]
+            p2 = pts[i + 1]
+            dx = p2.x - p1.x
+            dy = p2.y - p1.y
+            length = math.hypot(dx, dy)
+            if length < 1e-6:
+                length = 1e-6
+            nx = dy / length * dist
+            ny = -dx / length * dist
+            lines.append(((p1.x + nx, p1.y + ny), (p2.x + nx, p2.y + ny)))
+
+        if not lines:
+            return [Vec3(p.x, p.y, p.z) for p in pts]
+
+        out = [Vec3(lines[0][0][0], lines[0][0][1], pts[0].z)]
+        for i in range(len(lines) - 1):
+            (x1, y1), (x2, y2) = lines[i]
+            (x3, y3), (x4, y4) = lines[i + 1]
+            denom = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4)
+            z = pts[i + 1].z
+            if abs(denom) < 1e-6:
+                out.append(Vec3(x2, y2, z))
+            else:
+                t = ((x1 - x3) * (y3 - y4) - (y1 - y3) * (x3 - x4)) / denom
+                ix = x1 + t * (x2 - x1)
+                iy = y1 + t * (y2 - y1)
+                if math.hypot(ix - pts[i + 1].x, iy - pts[i + 1].y) > 3.0 * abs(dist):
+                    out.append(Vec3(0.5 * (x2 + x3), 0.5 * (y2 + y3), z))
+                else:
+                    out.append(Vec3(ix, iy, z))
+        out.append(Vec3(lines[-1][1][0], lines[-1][1][1], pts[-1].z))
+        return out
 
 
 # ============================================================================
@@ -61,7 +99,7 @@ class WallFromCurveNode(BaseNode):
     header_color = (191, 97, 106)
 
     inputs = [
-        InputSpec("curve", "Curve / Baseline", SocketType.CURVE, default=None, hide_widget=True),
+        InputSpec("curve", "Curve / Baseline", SocketType.ANY, default=None, hide_widget=True),
         InputSpec("thickness", "Thickness (m)", SocketType.FLOAT, default=0.25, min_val=0.05, step=0.05),
         InputSpec("height", "Height (m)", SocketType.FLOAT, default=3.0, min_val=0.5, step=0.5),
         InputSpec("elevation", "Elevation (m)", SocketType.FLOAT, default=0.0, step=0.5),
@@ -78,6 +116,14 @@ class WallFromCurveNode(BaseNode):
         if isinstance(curve, CurveData) and curve.points:
             pts = curve.points
             is_closed = curve.closed
+        elif isinstance(curve, MeshData) and curve.vertices:
+            # Accept MeshData (Face output from curve nodes)
+            if curve.faces and len(curve.faces[0]) >= 3:
+                f_indices = curve.faces[0]
+                pts = [Vec3(curve.vertices[idx][0], curve.vertices[idx][1], curve.vertices[idx][2]) for idx in f_indices]
+            else:
+                pts = [Vec3(v[0], v[1], v[2]) for v in curve.vertices]
+            is_closed = True
         elif isinstance(curve, list) and curve and isinstance(curve[0], Vec3):
             pts = curve
         else:
@@ -95,8 +141,8 @@ class WallFromCurveNode(BaseNode):
 
         # Generate outer and inner loops
         half_th = th * 0.5
-        outer_pts = _offset_points(base_pts, half_th)
-        inner_pts = _offset_points(base_pts, -half_th)
+        outer_pts = _offset_points(base_pts, half_th, is_closed=is_closed)
+        inner_pts = _offset_points(base_pts, -half_th, is_closed=is_closed)
 
         verts: List[Tuple[float, float, float]] = []
         faces: List[List[int]] = []
@@ -115,36 +161,75 @@ class WallFromCurveNode(BaseNode):
         for p in inner_pts:
             verts.append((p.x, p.y, z1))
 
-        # 1. Outer vertical faces (CCW)
-        for i in range(n):
-            nxt = (i + 1) % n
-            faces.append([i, nxt, n + nxt, n + i])
-            edges.append((i, nxt))
-            edges.append((n + i, n + nxt))
-            edges.append((i, n + i))
+        if is_closed:
+            # 1. Outer vertical faces (CCW)
+            for i in range(n):
+                nxt = (i + 1) % n
+                faces.append([i, nxt, n + nxt, n + i])
+                edges.append((i, nxt))
+                edges.append((n + i, n + nxt))
+                edges.append((i, n + i))
 
-        # 2. Inner vertical faces (reversed CCW inward)
-        for i in range(n):
-            nxt = (i + 1) % n
-            faces.append([3 * n + i, 3 * n + nxt, 2 * n + nxt, 2 * n + i])
-            edges.append((2 * n + i, 2 * n + nxt))
-            edges.append((3 * n + i, 3 * n + nxt))
-            edges.append((2 * n + i, 3 * n + i))
+            # 2. Inner vertical faces (reversed CCW inward)
+            for i in range(n):
+                nxt = (i + 1) % n
+                faces.append([3 * n + i, 3 * n + nxt, 2 * n + nxt, 2 * n + i])
+                edges.append((2 * n + i, 2 * n + nxt))
+                edges.append((3 * n + i, 3 * n + nxt))
+                edges.append((2 * n + i, 3 * n + i))
 
-        # 3. Top cap quad between outer top and inner top
-        for i in range(n):
-            nxt = (i + 1) % n
-            faces.append([n + i, n + nxt, 3 * n + nxt, 3 * n + i])
+            # 3. Top cap quad between outer top and inner top
+            for i in range(n):
+                nxt = (i + 1) % n
+                faces.append([n + i, n + nxt, 3 * n + nxt, 3 * n + i])
 
-        # 4. Bottom cap quad between inner bottom and outer bottom
-        for i in range(n):
-            nxt = (i + 1) % n
-            faces.append([2 * n + i, 2 * n + nxt, nxt, i])
+            # 4. Bottom cap quad between inner bottom and outer bottom
+            for i in range(n):
+                nxt = (i + 1) % n
+                faces.append([2 * n + i, 2 * n + nxt, nxt, i])
+        else:
+            # Open curve wall: n-1 segments with watertight start and end caps
+            # 1. Outer vertical side faces (0..n-2)
+            for i in range(n - 1):
+                faces.append([i, i + 1, n + i + 1, n + i])
+                edges.append((i, i + 1))
+                edges.append((n + i, n + i + 1))
+                edges.append((i, n + i))
+            edges.append((n - 1, 2 * n - 1))
+
+            # 2. Inner vertical side faces (0..n-2, facing inward)
+            for i in range(n - 1):
+                faces.append([2 * n + i + 1, 2 * n + i, 3 * n + i, 3 * n + i + 1])
+                edges.append((2 * n + i, 2 * n + i + 1))
+                edges.append((3 * n + i, 3 * n + i + 1))
+                edges.append((2 * n + i, 3 * n + i))
+            edges.append((3 * n - 1, 4 * n - 1))
+
+            # 3. Top cap quads (0..n-2)
+            for i in range(n - 1):
+                faces.append([n + i, n + i + 1, 3 * n + i + 1, 3 * n + i])
+
+            # 4. Bottom cap quads (0..n-2)
+            for i in range(n - 1):
+                faces.append([i, 2 * n + i, 2 * n + i + 1, i + 1])
+
+            # 5. Start end-cap quad (at i = 0)
+            faces.append([0, n, 3 * n, 2 * n])
+            edges.append((0, 2 * n))
+            edges.append((n, 3 * n))
+
+            # 6. Finish end-cap quad (at i = n - 1)
+            faces.append([n - 1, 2 * n + n - 1, 3 * n + n - 1, n + n - 1])
+            edges.append((n - 1, 2 * n + n - 1))
+            edges.append((2 * n - 1, 4 * n - 1))
+
+        # Deduplicate edges while preserving order
+        unique_edges = list(dict.fromkeys(edges))
 
         wall_mesh = MeshData(
             vertices=verts,
             faces=faces,
-            edges=edges,
+            edges=unique_edges,
             name="Parametric_Wall",
             ifc_class="IfcWall",
         )

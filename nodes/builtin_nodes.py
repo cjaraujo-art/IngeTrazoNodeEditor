@@ -21,6 +21,7 @@ except (ImportError, ValueError):
 @register_node
 class NumberSliderNode(BaseNode):
     type_id = "input.number"
+    description = "Floating-point number slider with decimal precision and customizable limits."
     title = "Number Slider"
     category = "Inputs"
     header_color = (44, 110, 130)
@@ -38,6 +39,7 @@ class NumberSliderNode(BaseNode):
 @register_node
 class IntegerSliderNode(BaseNode):
     type_id = "input.integer"
+    description = "Integer number slider with customizable limits and step value."
     title = "Integer Slider"
     category = "Inputs"
     header_color = (44, 110, 130)
@@ -94,6 +96,7 @@ class BooleanToggleNode(BaseNode):
 @register_node
 class StringInputNode(BaseNode):
     type_id = "input.string"
+    description = "Text string input or constant."
     title = "String / Text"
     category = "Inputs"
     header_color = (44, 110, 130)
@@ -209,6 +212,7 @@ class PanelNode(BaseNode):
 @register_node
 class SeriesNode(BaseNode):
     type_id = "math.series"
+    description = "Generates an arithmetic series of numbers."
     title = "Series (Range)"
     category = "Math & Lists"
     header_color = (60, 100, 140)
@@ -258,6 +262,7 @@ def _eval_ast(node: ast.AST, env: Dict[str, Any]) -> float:
 @register_node
 class MathExpressionNode(BaseNode):
     type_id = "math.expression"
+    description = "Evaluates a mathematical formula expression f(x, y)."
     title = "Math Expression"
     category = "Math & Lists"
     header_color = (60, 100, 140)
@@ -279,6 +284,7 @@ class MathExpressionNode(BaseNode):
 @register_node
 class DivideDomainNode(BaseNode):
     type_id = "math.divide_domain"
+    description = "Divides a numeric range or interval into N equal steps."
     title = "Divide Domain"
     category = "Math & Lists"
     header_color = (60, 100, 140)
@@ -304,6 +310,7 @@ class DivideDomainNode(BaseNode):
 @register_node
 class CrossReferenceNode(BaseNode):
     type_id = "math.cross_reference"
+    description = "Performs Cartesian cross-referencing between two lists."
     title = "Cross Reference"
     category = "Math & Lists"
     header_color = (60, 100, 140)
@@ -333,6 +340,7 @@ class CrossReferenceNode(BaseNode):
 @register_node
 class MathAddNode(BaseNode):
     type_id = "math.add"
+    description = "Adds numbers, vectors, or lists."
     title = "Add"
     category = "Math & Lists"
     header_color = (60, 100, 140)
@@ -360,6 +368,7 @@ class MathAddNode(BaseNode):
 @register_node
 class MathSubtractNode(BaseNode):
     type_id = "math.subtract"
+    description = "Subtracts input B from input A."
     title = "Subtract"
     category = "Math & Lists"
     header_color = (60, 100, 140)
@@ -387,6 +396,7 @@ class MathSubtractNode(BaseNode):
 @register_node
 class MathMultiplyNode(BaseNode):
     type_id = "math.multiply"
+    description = "Multiplies numbers, vectors, or lists."
     title = "Multiply"
     category = "Math & Lists"
     header_color = (60, 100, 140)
@@ -412,6 +422,7 @@ class MathMultiplyNode(BaseNode):
 @register_node
 class MathDivideNode(BaseNode):
     type_id = "math.divide"
+    description = "Divides input A by input B."
     title = "Divide"
     category = "Math & Lists"
     header_color = (60, 100, 140)
@@ -441,6 +452,7 @@ class MathDivideNode(BaseNode):
 @register_node
 class ConstructPointNode(BaseNode):
     type_id = "vec.point_xyz"
+    description = "Constructs a 3D point from X, Y, Z coordinates."
     title = "Point XYZ"
     category = "Points & Vectors"
     header_color = (58, 125, 68)
@@ -460,6 +472,7 @@ class ConstructPointNode(BaseNode):
 @register_node
 class PointGrid2DNode(BaseNode):
     type_id = "vec.grid_2d"
+    description = "Generates a 2D regular grid of points with spacing and counts."
     title = "Point Grid (2D)"
     category = "Points & Vectors"
     header_color = (58, 125, 68)
@@ -485,6 +498,7 @@ class PointGrid2DNode(BaseNode):
 @register_node
 class DeconstructPointNode(BaseNode):
     type_id = "vec.deconstruct"
+    description = "Deconstructs a point or vector into its X, Y, Z coordinate components."
     title = "Deconstruct Point"
     category = "Points & Vectors"
     header_color = (58, 125, 68)
@@ -505,6 +519,7 @@ class DeconstructPointNode(BaseNode):
 @register_node
 class DistanceNode(BaseNode):
     type_id = "vec.distance"
+    description = "Calculates Euclidean distance between two points."
     title = "Distance"
     category = "Points & Vectors"
     header_color = (58, 125, 68)
@@ -525,6 +540,7 @@ class DistanceNode(BaseNode):
 @register_node
 class VectorMathNode(BaseNode):
     type_id = "vec.math"
+    description = "Performs vector arithmetic (Addition, Subtraction, Dot Product, Cross Product, Normalization)."
     title = "Vector Math"
     category = "Points & Vectors"
     header_color = (58, 125, 68)
@@ -643,6 +659,7 @@ class PlaneFromNormalNode(BaseNode):
 @register_node
 class RectangleProfileNode(BaseNode):
     type_id = "curve.rectangle"
+    description = "Generates a rectangular polyline with optional rounded fillet corners."
     title = "Rectangle Profile"
     category = "Curves"
     header_color = (165, 105, 45)
@@ -669,6 +686,7 @@ class RectangleProfileNode(BaseNode):
 @register_node
 class BoxSolidNode(BaseNode):
     type_id = "solid.box"
+    description = "Generates a 3D watertight cuboid / box solid."
     title = "Box (Cuboid)"
     category = "3D Solids"
     header_color = (125, 70, 150)
@@ -689,6 +707,7 @@ class BoxSolidNode(BaseNode):
 @register_node
 class CylinderSolidNode(BaseNode):
     type_id = "solid.cylinder"
+    description = "Generates a 3D watertight cylinder or architectural column solid."
     title = "Cylinder / Column"
     category = "3D Solids"
     header_color = (125, 70, 150)
@@ -709,6 +728,7 @@ class CylinderSolidNode(BaseNode):
 @register_node
 class SphereSolidNode(BaseNode):
     type_id = "solid.sphere"
+    description = "Generates a 3D watertight UV sphere solid."
     title = "Sphere"
     category = "3D Solids"
     header_color = (125, 70, 150)
@@ -729,6 +749,7 @@ class SphereSolidNode(BaseNode):
 @register_node
 class MeshFromPointsNode(BaseNode):
     type_id = "solid.mesh_from_points"
+    description = "Generates a 3D mesh surface from a grid or array of points."
     title = "Mesh From Points"
     category = "3D Solids"
     header_color = (125, 70, 150)
@@ -778,6 +799,7 @@ class MeshFromPointsNode(BaseNode):
 @register_node
 class TransformMeshNode(BaseNode):
     type_id = "transform.move_rot_scale"
+    description = "Applies translation, rotation, and uniform scaling to 3D geometry."
     title = "Transform Solid"
     category = "Transforms"
     header_color = (90, 95, 135)
@@ -801,6 +823,7 @@ class TransformMeshNode(BaseNode):
 @register_node
 class MergeMeshesNode(BaseNode):
     type_id = "transform.merge"
+    description = "Merges multiple solids or meshes into a single compound geometry."
     title = "Merge Solids"
     category = "Transforms"
     header_color = (90, 95, 135)
@@ -824,6 +847,7 @@ class MergeMeshesNode(BaseNode):
 @register_node
 class IngeTrazoOutputNode(BaseNode):
     type_id = "scene.output"
+    description = "Exports geometry and assemblies to the IngeTrazo 3D scene with BIM metadata (IfcColumn, IfcWall, etc.)."
     title = "IngeTrazo BIM Output"
     category = "Scene Output"
     header_color = (180, 65, 65)
