@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 import math
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 try:
     from ..core_types import AccessMode, CurveData, MeshData, SocketType, Vec3
@@ -126,6 +126,23 @@ class WallFromCurveNode(BaseNode):
             is_closed = True
         elif isinstance(curve, list) and curve and isinstance(curve[0], Vec3):
             pts = curve
+        elif isinstance(curve, list) and curve and (isinstance(curve[0], CurveData) or isinstance(curve[0], MeshData) or (isinstance(curve[0], list) and curve[0] and isinstance(curve[0][0], Vec3))):
+            wall_meshes: List[MeshData] = []
+            outer_curves: List[CurveData] = []
+            inner_curves: List[CurveData] = []
+            for item in curve:
+                res = self.compute(curve=item, thickness=thickness, height=height, elevation=elevation)
+                wall_meshes.append(res["wall_mesh"])
+                if isinstance(res["outer_curve"], CurveData):
+                    outer_curves.append(res["outer_curve"])
+                if isinstance(res["inner_curve"], CurveData):
+                    inner_curves.append(res["inner_curve"])
+            merged_walls = MeshData.merge(wall_meshes, name="Walls")
+            return {
+                "wall_mesh": merged_walls,
+                "outer_curve": outer_curves[0] if outer_curves else CurveData(),
+                "inner_curve": inner_curves[0] if inner_curves else CurveData(),
+            }
         else:
             # Default fallback: 12x8m room
             pts = [Vec3(0, 0, 0), Vec3(12, 0, 0), Vec3(12, 8, 0), Vec3(0, 8, 0)]
@@ -533,5 +550,256 @@ class ArchitecturalGridNode(BaseNode):
             "mesh": grid_mesh,
             "x_coords": x_coords,
             "y_coords": y_coords,
+        }
+
+
+# ============================================================================
+# Surface Subdivide Node
+# ============================================================================
+@register_node
+class SurfaceSubdivideNode(BaseNode):
+    type_id = "surface.subdivide"
+    title = "Surface Subdivide"
+    category = "Architecture"
+    description = (
+        "Subdivide a planar face or surface (such as from Reference Face) into a parametric UV grid of panels,\n"
+        "individual sub-face meshes, boundary curves, and division points.\n"
+        "Supports quad bilinear subdivision and planar polygon grids with optional frame gaps."
+    )
+    header_color = (94, 129, 172)
+
+    inputs = [
+        InputSpec("surface", "Surface / Face", SocketType.ANY, default=None, hide_widget=True),
+        InputSpec("u_count", "U Segments", SocketType.INT, default=3, min_val=1, max_val=100, step=1),
+        InputSpec("v_count", "V Segments", SocketType.INT, default=3, min_val=1, max_val=100, step=1),
+        InputSpec("frame_width", "Frame Gap (m)", SocketType.FLOAT, default=0.0, min_val=0.0, max_val=1.0, step=0.01),
+    ]
+    outputs = [
+        OutputSpec("mesh", "Subdivided Mesh", SocketType.MESH),
+        OutputSpec("faces", "Sub-Faces", SocketType.ANY),
+        OutputSpec("curves", "Cell Curves", SocketType.ANY),
+        OutputSpec("points", "Grid Points", SocketType.VEC3),
+        OutputSpec("centers", "Cell Centers", SocketType.VEC3),
+    ]
+
+    def compute(
+        self,
+        surface: Any = None,
+        u_count: int = 3,
+        v_count: int = 3,
+        frame_width: float = 0.0,
+    ) -> Dict[str, Any]:
+        u_div = max(1, int(u_count))
+        v_div = max(1, int(v_count))
+        gap = max(0.0, float(frame_width))
+
+        if isinstance(surface, list) and surface and (isinstance(surface[0], dict) or isinstance(surface[0], MeshData) or isinstance(surface[0], CurveData)):
+            all_meshes = []
+            all_sub_faces = []
+            all_curves = []
+            all_pts = []
+            all_centers = []
+            for s in surface:
+                res = self.compute(surface=s, u_count=u_count, v_count=v_count, frame_width=frame_width)
+                all_meshes.append(res["mesh"])
+                all_sub_faces.extend(res["faces"])
+                all_curves.extend(res["curves"])
+                all_pts.extend(res["points"])
+                all_centers.extend(res["centers"])
+            merged_mesh = MeshData.merge(all_meshes, name="SubdividedSurfaces")
+            return {
+                "mesh": merged_mesh,
+                "faces": all_sub_faces,
+                "curves": all_curves,
+                "points": all_pts,
+                "centers": all_centers,
+            }
+
+        pts: List[Vec3] = []
+        if isinstance(surface, dict) and "outer" in surface:
+            pts = [Vec3(float(p[0]), float(p[1]), float(p[2])) for p in surface.get("outer", [])]
+        elif isinstance(surface, MeshData):
+            c = surface.perimeter_as_curve()
+            pts = [Vec3(p.x, p.y, p.z) for p in c.points]
+        elif isinstance(surface, CurveData) and surface.points:
+            pts = [Vec3(p.x, p.y, p.z) for p in surface.points]
+        elif isinstance(surface, list) and surface:
+            for item in surface:
+                if isinstance(item, Vec3):
+                    pts.append(item)
+                elif isinstance(item, (tuple, list)) and len(item) >= 3:
+                    pts.append(Vec3(float(item[0]), float(item[1]), float(item[2])))
+
+        if len(pts) < 3:
+            pts = [
+                Vec3(0.0, 0.0, 0.0),
+                Vec3(12.0, 0.0, 0.0),
+                Vec3(12.0, 8.0, 0.0),
+                Vec3(0.0, 8.0, 0.0),
+            ]
+
+        n_pts = len(pts)
+        nx = ny = nz = 0.0
+        for i in range(n_pts):
+            p0 = pts[i]
+            p1 = pts[(i + 1) % n_pts]
+            nx += (p0.y - p1.y) * (p0.z + p1.z)
+            ny += (p0.z - p1.z) * (p0.x + p1.x)
+            nz += (p0.x - p1.x) * (p0.y + p1.y)
+        norm_len = math.sqrt(nx * nx + ny * ny + nz * nz)
+        normal = Vec3(0.0, 0.0, 1.0) if norm_len < 1e-9 else Vec3(nx / norm_len, ny / norm_len, nz / norm_len)
+
+        all_grid_points: List[Vec3] = []
+        cell_centers: List[Vec3] = []
+        cell_curves: List[CurveData] = []
+        sub_face_meshes: List[MeshData] = []
+
+        combined_verts: List[Tuple[float, float, float]] = []
+        combined_faces: List[List[int]] = []
+        combined_edges: List[Tuple[int, int]] = []
+
+        def add_cell_polygon(poly: List[Vec3], cell_name: str) -> None:
+            if len(poly) < 3:
+                return
+            cell_curves.append(CurveData(points=[Vec3(p.x, p.y, p.z) for p in poly], closed=True))
+            c_x = sum(p.x for p in poly) / len(poly)
+            c_y = sum(p.y for p in poly) / len(poly)
+            c_z = sum(p.z for p in poly) / len(poly)
+            cell_centers.append(Vec3(c_x, c_y, c_z))
+
+            m_verts = [(p.x, p.y, p.z) for p in poly]
+            m_faces = [list(range(len(poly)))]
+            m_edges = [(i, (i + 1) % len(poly)) for i in range(len(poly))]
+            sub_mesh = MeshData(
+                vertices=m_verts,
+                faces=m_faces,
+                edges=m_edges,
+                name=cell_name,
+                material_name="Panel",
+                color=(0.85, 0.88, 0.92),
+            )
+            sub_face_meshes.append(sub_mesh)
+
+            base_idx = len(combined_verts)
+            for v in m_verts:
+                combined_verts.append(v)
+            combined_faces.append([base_idx + idx for idx in m_faces[0]])
+            for e in m_edges:
+                combined_edges.append((base_idx + e[0], base_idx + e[1]))
+
+        if len(pts) == 4:
+            p00, p10, p11, p01 = pts[0], pts[1], pts[2], pts[3]
+
+            def eval_uv(u: float, v: float) -> Vec3:
+                x = (1.0 - u) * (1.0 - v) * p00.x + u * (1.0 - v) * p10.x + u * v * p11.x + (1.0 - u) * v * p01.x
+                y = (1.0 - u) * (1.0 - v) * p00.y + u * (1.0 - v) * p10.y + u * v * p11.y + (1.0 - u) * v * p01.y
+                z = (1.0 - u) * (1.0 - v) * p00.z + u * (1.0 - v) * p10.z + u * v * p11.z + (1.0 - u) * v * p01.z
+                return Vec3(x, y, z)
+
+            grid_v = []
+            for j in range(v_div + 1):
+                row = []
+                v_frac = j / v_div
+                for i in range(u_div + 1):
+                    u_frac = i / u_div
+                    pt = eval_uv(u_frac, v_frac)
+                    row.append(pt)
+                    all_grid_points.append(pt)
+                grid_v.append(row)
+
+            for j in range(v_div):
+                for i in range(u_div):
+                    c00 = grid_v[j][i]
+                    c10 = grid_v[j][i + 1]
+                    c11 = grid_v[j + 1][i + 1]
+                    c01 = grid_v[j + 1][i]
+
+                    cell_quad = [c00, c10, c11, c01]
+                    if gap > 1e-4:
+                        cx = (c00.x + c10.x + c11.x + c01.x) * 0.25
+                        cy = (c00.y + c10.y + c11.y + c01.y) * 0.25
+                        cz = (c00.z + c10.z + c11.z + c01.z) * 0.25
+                        cent = Vec3(cx, cy, cz)
+
+                        inset_quad = []
+                        for corner in cell_quad:
+                            d_vec = cent - corner
+                            d_len = d_vec.length()
+                            if d_len > gap * 0.5:
+                                inset_quad.append(corner + d_vec.normalized() * (gap * 0.5))
+                            else:
+                                inset_quad.append(corner)
+                        cell_quad = inset_quad
+
+                    add_cell_polygon(cell_quad, f"Panel_{i}_{j}")
+        else:
+            u_dir = (pts[1] - pts[0]).normalized()
+            v_dir = normal.cross(u_dir).normalized()
+            origin = pts[0]
+
+            poly_2d = []
+            for p in pts:
+                rel = p - origin
+                poly_2d.append((rel.dot(u_dir), rel.dot(v_dir)))
+
+            u_vals = [p[0] for p in poly_2d]
+            v_vals = [p[1] for p in poly_2d]
+            u_min, u_max = min(u_vals), max(u_vals)
+            v_min, v_max = min(v_vals), max(v_vals)
+            u_span = max(1e-4, u_max - u_min)
+            v_span = max(1e-4, v_max - v_min)
+
+            def to_3d(u: float, v: float) -> Vec3:
+                return Vec3(
+                    origin.x + u * u_dir.x + v * v_dir.x,
+                    origin.y + u * u_dir.y + v * v_dir.y,
+                    origin.z + u * u_dir.z + v * v_dir.z,
+                )
+
+            for j in range(v_div + 1):
+                v_val = v_min + j * (v_span / v_div)
+                for i in range(u_div + 1):
+                    u_val = u_min + i * (u_span / u_div)
+                    all_grid_points.append(to_3d(u_val, v_val))
+
+            for j in range(v_div):
+                v0 = v_min + j * (v_span / v_div)
+                v1 = v_min + (j + 1) * (v_span / v_div)
+                for i in range(u_div):
+                    u0 = u_min + i * (u_span / u_div)
+                    u1 = u_min + (i + 1) * (u_span / u_div)
+
+                    c00 = to_3d(u0, v0)
+                    c10 = to_3d(u1, v0)
+                    c11 = to_3d(u1, v1)
+                    c01 = to_3d(u0, v1)
+
+                    cell_quad = [c00, c10, c11, c01]
+                    if gap > 1e-4:
+                        cx = (c00.x + c10.x + c11.x + c01.x) * 0.25
+                        cy = (c00.y + c10.y + c11.y + c01.y) * 0.25
+                        cz = (c00.z + c10.z + c11.z + c01.z) * 0.25
+                        cent = Vec3(cx, cy, cz)
+                        cell_quad = [corner + (cent - corner).normalized() * min((cent - corner).length() * 0.5, gap * 0.5) for corner in cell_quad]
+
+                    add_cell_polygon(cell_quad, f"Panel_{i}_{j}")
+
+        combined_mesh = MeshData(
+            vertices=combined_verts,
+            faces=combined_faces,
+            edges=combined_edges,
+            name="SubdividedSurface",
+            material_name="Panel",
+            color=(0.85, 0.88, 0.92),
+            face_materials=["Panel"] * len(combined_faces),
+            face_colors=[(0.85, 0.88, 0.92)] * len(combined_faces),
+        )
+
+        return {
+            "mesh": combined_mesh,
+            "faces": sub_face_meshes,
+            "curves": cell_curves,
+            "points": all_grid_points,
+            "centers": cell_centers,
         }
 

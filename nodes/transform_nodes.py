@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: GPL-3.0-or-later
+﻿# SPDX-License-Identifier: GPL-3.0-or-later
 """Parametric Geometry Transformation, Extrusion, Revolve, and Array Nodes."""
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ class ExtrudeSolidNode(BaseNode):
     header_color = (155, 89, 182)
 
     inputs = [
-        InputSpec("curve", "Profile Curve", SocketType.CURVE, default=None, hide_widget=True),
+        InputSpec("curve", "Curve / Face", SocketType.ANY, default=None, hide_widget=True),
         InputSpec("height", "Height (Z)", SocketType.FLOAT, default=3.0, step=0.5),
         InputSpec("capped", "Cap Ends", SocketType.BOOL, default=True),
     ]
@@ -34,6 +34,9 @@ class ExtrudeSolidNode(BaseNode):
     ]
 
     def compute(self, curve: Any, height: float, capped: bool) -> Dict[str, Any]:
+        if isinstance(curve, MeshData) or (isinstance(curve, dict) and ("outer" in curve or "faces" in curve)):
+            mesh = MeshData.extrude_face(curve, float(height), cap=bool(capped))
+            return {"solid": mesh}
         if not isinstance(curve, CurveData) or not curve.points:
             curve = CurveData(
                 points=[Vec3(0, 0, 0), Vec3(4, 0, 0), Vec3(4, 3, 0), Vec3(0, 3, 0)],
@@ -41,6 +44,43 @@ class ExtrudeSolidNode(BaseNode):
             )
         mesh = MeshData.extrude_curve(curve, float(height), cap=bool(capped))
         return {"solid": mesh}
+
+
+# ============================================================================
+# 1b. Extrude Face Node
+# ============================================================================
+@register_node
+class ExtrudeFaceNode(BaseNode):
+    type_id = "solid.extrude_face"
+    title = "Extrude Face"
+    category = "3D Solids"
+    description = "Extrudes any 2D planar face, surface, or annular frame (including holes) into a watertight 3D solid with capped ends."
+    header_color = (155, 89, 182)
+
+    inputs = [
+        InputSpec("face", "Face / Surface", SocketType.ANY, default=None, hide_widget=True),
+        InputSpec("height", "Height (m)", SocketType.FLOAT, default=3.0, step=0.5),
+        InputSpec("capped", "Cap Ends", SocketType.BOOL, default=True),
+        InputSpec("direction", "Extrusion Vector", SocketType.VEC3, default=None, hide_widget=True),
+    ]
+    outputs = [
+        OutputSpec("solid", "Solid Mesh", SocketType.MESH),
+        OutputSpec("outer", "Outer Perimeter", SocketType.CURVE),
+        OutputSpec("holes", "Holes", SocketType.ANY),
+    ]
+
+    def compute(self, face: Any = None, height: float = 3.0, capped: bool = True, direction: Any = None) -> Dict[str, Any]:
+        mesh = MeshData.extrude_face(face, float(height), cap=bool(capped), direction=direction)
+        outer_pts = getattr(mesh, "outer", None) or []
+        outer_c = CurveData(points=[Vec3(p[0], p[1], p[2]) for p in outer_pts], closed=True) if outer_pts else CurveData()
+        holes_pts = getattr(mesh, "holes", None) or []
+        holes_c = [CurveData(points=[Vec3(p[0], p[1], p[2]) for p in h], closed=True) for h in holes_pts]
+        return {
+            "solid": mesh,
+            "mesh": mesh,
+            "outer": outer_c,
+            "holes": holes_c,
+        }
 
 
 # ============================================================================
@@ -781,3 +821,207 @@ class FlipNormalsNode(BaseNode):
             return {"geometry": out_list}
 
         return {"geometry": geometry}
+
+
+# ============================================================================
+# Loft Solid Node
+# ============================================================================
+@register_node
+class LoftNode(BaseNode):
+    type_id = "solid.loft"
+    title = "Loft"
+    category = "3D Solids"
+    description = (
+        "Create a 3D transitional surface or solid by lofting through a series of section curves or faces.\n"
+        "Accepts a list of cross-sections or discrete section inputs (Section A, B, C)."
+    )
+    header_color = (219, 133, 44)
+
+    inputs = [
+        InputSpec("sections", "Sections (List)", SocketType.ANY, default=None, hide_widget=True),
+        InputSpec("section_a", "Section A", SocketType.ANY, default=None, hide_widget=True),
+        InputSpec("section_b", "Section B", SocketType.ANY, default=None, hide_widget=True),
+        InputSpec("section_c", "Section C", SocketType.ANY, default=None, hide_widget=True),
+        InputSpec("close_loft", "Close Loft", SocketType.BOOL, default=False),
+        InputSpec("cap_ends", "Cap Ends", SocketType.BOOL, default=True),
+        InputSpec("rebuild_count", "Sample Count", SocketType.INT, default=32, min_val=4, max_val=256, step=2),
+    ]
+    outputs = [
+        OutputSpec("mesh", "Loft Mesh", SocketType.MESH),
+        OutputSpec("curves", "Section Curves", SocketType.ANY),
+    ]
+
+    @staticmethod
+    def _resample_curve(pts: List[Vec3], count: int, is_closed: bool) -> List[Vec3]:
+        n = len(pts)
+        if n < 2:
+            return [Vec3(p.x, p.y, p.z) for p in pts]
+        poly = list(pts)
+        if is_closed and (poly[0].distance_to(poly[-1]) > 1e-4):
+            poly.append(poly[0])
+
+        cum = [0.0]
+        for i in range(len(poly) - 1):
+            cum.append(cum[-1] + poly[i].distance_to(poly[i + 1]))
+        total_len = cum[-1]
+        if total_len < 1e-9:
+            return [poly[0]] * count
+
+        resampled: List[Vec3] = []
+        if is_closed:
+            targets = [i * (total_len / count) for i in range(count)]
+        else:
+            targets = [i * (total_len / (count - 1)) for i in range(count)]
+
+        idx = 0
+        for d in targets:
+            while idx < len(cum) - 2 and cum[idx + 1] < d:
+                idx += 1
+            l0, l1 = cum[idx], cum[idx + 1]
+            p0, p1 = poly[idx], poly[idx + 1]
+            seg_l = max(1e-9, l1 - l0)
+            t = max(0.0, min(1.0, (d - l0) / seg_l))
+            resampled.append(Vec3(p0.x + t * (p1.x - p0.x), p0.y + t * (p1.y - p0.y), p0.z + t * (p1.z - p0.z)))
+        return resampled
+
+    def compute(
+        self,
+        sections: Any = None,
+        section_a: Any = None,
+        section_b: Any = None,
+        section_c: Any = None,
+        close_loft: bool = False,
+        cap_ends: bool = True,
+        rebuild_count: int = 32,
+    ) -> Dict[str, Any]:
+        m_samples = max(4, int(rebuild_count))
+
+        raw_list: List[Any] = []
+        if isinstance(sections, (list, tuple)) and sections:
+            raw_list.extend(sections)
+        else:
+            for s in (section_a, section_b, section_c):
+                if s is not None:
+                    raw_list.append(s)
+
+        curves: List[CurveData] = []
+        for item in raw_list:
+            if isinstance(item, CurveData) and len(item.points) >= 2:
+                curves.append(item.copy())
+            elif isinstance(item, MeshData):
+                c = item.perimeter_as_curve()
+                if len(c.points) >= 2:
+                    curves.append(c)
+            elif isinstance(item, dict) and "outer" in item:
+                outer_pts = [Vec3(float(p[0]), float(p[1]), float(p[2])) for p in item.get("outer", [])]
+                if len(outer_pts) >= 2:
+                    curves.append(CurveData(points=outer_pts, closed=True))
+            elif isinstance(item, list) and item:
+                pts_list = []
+                for p in item:
+                    if isinstance(p, Vec3):
+                        pts_list.append(p)
+                    elif isinstance(p, (list, tuple)) and len(p) >= 3:
+                        pts_list.append(Vec3(float(p[0]), float(p[1]), float(p[2])))
+                if len(pts_list) >= 2:
+                    curves.append(CurveData(points=pts_list, closed=True))
+
+        if len(curves) < 2:
+            curves = [
+                CurveData(points=[Vec3(3.0 * math.cos(math.pi * 2.0 * i / 16.0), 3.0 * math.sin(math.pi * 2.0 * i / 16.0), 0.0) for i in range(16)], closed=True),
+                CurveData(points=[Vec3(4.5 * math.cos(math.pi * 2.0 * i / 16.0), 4.5 * math.sin(math.pi * 2.0 * i / 16.0), 2.5) for i in range(16)], closed=True),
+                CurveData(points=[Vec3(2.5 * math.cos(math.pi * 2.0 * i / 16.0), 2.5 * math.sin(math.pi * 2.0 * i / 16.0), 5.0) for i in range(16)], closed=True),
+            ]
+
+        k_sections = len(curves)
+        is_closed_cross = all(c.closed for c in curves)
+
+        resampled_rings: List[List[Vec3]] = []
+        for c in curves:
+            ring = self._resample_curve(c.points, m_samples, is_closed_cross)
+            resampled_rings.append(ring)
+
+        for j in range(k_sections - 1):
+            r_curr = resampled_rings[j]
+            r_next = resampled_rings[j + 1]
+
+            best_shift = 0
+            best_dist = float("inf")
+            best_reversed = False
+
+            for is_rev in (False, True):
+                cand = list(reversed(r_next)) if is_rev else r_next
+                for shift in range(m_samples if is_closed_cross else 1):
+                    d_sum = 0.0
+                    for i in range(m_samples):
+                        i_shifted = (i + shift) % m_samples
+                        d_sum += r_curr[i].distance_to(cand[i_shifted])
+                    if d_sum < best_dist:
+                        best_dist = d_sum
+                        best_shift = shift
+                        best_reversed = is_rev
+
+            chosen = list(reversed(r_next)) if best_reversed else r_next
+            if is_closed_cross:
+                resampled_rings[j + 1] = [chosen[(i + best_shift) % m_samples] for i in range(m_samples)]
+            else:
+                resampled_rings[j + 1] = chosen
+
+        mesh_verts: List[Tuple[float, float, float]] = []
+        mesh_faces: List[List[int]] = []
+        mesh_edges: List[Tuple[int, int]] = []
+
+        for ring in resampled_rings:
+            for p in ring:
+                mesh_verts.append((p.x, p.y, p.z))
+
+        num_layers = k_sections if close_loft else (k_sections - 1)
+        for j in range(num_layers):
+            j_next = (j + 1) % k_sections
+            base_curr = j * m_samples
+            base_next = j_next * m_samples
+
+            num_quads = m_samples if is_closed_cross else (m_samples - 1)
+            for i in range(num_quads):
+                i_next = (i + 1) % m_samples
+                v0 = base_curr + i
+                v1 = base_curr + i_next
+                v2 = base_next + i_next
+                v3 = base_next + i
+
+                mesh_faces.append([v0, v1, v2, v3])
+                mesh_edges.append((v0, v1))
+                mesh_edges.append((v1, v2))
+                mesh_edges.append((v2, v3))
+                mesh_edges.append((v3, v0))
+
+        if cap_ends and not close_loft and is_closed_cross and k_sections >= 2:
+            bottom_face = list(reversed(range(m_samples)))
+            mesh_faces.append(bottom_face)
+            for i in range(m_samples):
+                mesh_edges.append((i, (i + 1) % m_samples))
+
+            top_base = (k_sections - 1) * m_samples
+            top_face = [top_base + i for i in range(m_samples)]
+            mesh_faces.append(top_face)
+            for i in range(m_samples):
+                mesh_edges.append((top_base + i, top_base + (i + 1) % m_samples))
+
+        loft_mesh = MeshData(
+            vertices=mesh_verts,
+            faces=mesh_faces,
+            edges=mesh_edges,
+            name="LoftSolid",
+            material_name="DefaultLoft",
+            color=(0.85, 0.70, 0.45),
+            face_materials=["DefaultLoft"] * len(mesh_faces),
+            face_colors=[(0.85, 0.70, 0.45)] * len(mesh_faces),
+            ifc_class="IfcBuildingElementProxy",
+        )
+
+        out_curves = [CurveData(points=ring, closed=is_closed_cross) for ring in resampled_rings]
+
+        return {
+            "mesh": loft_mesh,
+            "curves": out_curves,
+        }

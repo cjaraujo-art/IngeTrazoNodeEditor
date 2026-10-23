@@ -14,7 +14,7 @@ ZIP_PATH = ROOT_DIR / "node_editor.zip"
 
 INCLUDE_EXTENSIONS = {".py", ".json", ".png"}
 EXCLUDE_DIRS = {"__pycache__", ".git", "tests", ".pytest_cache", ".vscode", ".idea"}
-EXCLUDE_FILES = {"node_editor.zip", "build_zip.py", "apply_i18n.py", "icons_sheet.jpg", "icons_sheet.png", "node_editor.png"}
+EXCLUDE_FILES = {"node_editor.zip", "build_zip.py", "apply_i18n.py", "icons_sheet.jpg", "icons_sheet.png", "new_icons.jpg", "node_editor.png"}
 
 
 def build():

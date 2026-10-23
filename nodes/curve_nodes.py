@@ -1,9 +1,9 @@
-# SPDX-License-Identifier: GPL-3.0-or-later
+﻿# SPDX-License-Identifier: GPL-3.0-or-later
 """Parametric 2D/3D Curve Shape Nodes."""
 
 from __future__ import annotations
 import math
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, Tuple
 
 try:
     from ..core_types import AccessMode, CurveData, MeshData, SocketType, Vec3
@@ -573,3 +573,404 @@ class CurvePointsNode(BaseNode):
             "count": len(pts),
         }
 
+
+# ============================================================================
+# 13. Divide Curve Node
+# ============================================================================
+@register_node
+class DivideCurveNode(BaseNode):
+    type_id = "curve.divide"
+    title = "Divide Curve"
+    category = "Curves"
+    description = (
+        "Divide a curve or face boundary into equal-length segments, outputting division points, segment curves,\n"
+        "and tangent vectors along the perimeter."
+    )
+    header_color = (68, 108, 179)
+
+    inputs = [
+        InputSpec("curve", "Curve / Face", SocketType.ANY, default=None, hide_widget=True),
+        InputSpec("count", "Count", SocketType.INT, default=10, min_val=1, max_val=500, step=1),
+        InputSpec("include_ends", "Include Ends", SocketType.BOOL, default=True),
+    ]
+    outputs = [
+        OutputSpec("points", "Points", SocketType.VEC3),
+        OutputSpec("tangents", "Tangents", SocketType.VEC3),
+        OutputSpec("segments", "Segments", SocketType.ANY),
+        OutputSpec("params", "Parameters (0-1)", SocketType.FLOAT),
+        OutputSpec("curve", "Curve", SocketType.CURVE),
+    ]
+
+    def compute(self, curve: Any = None, count: int = 10, include_ends: bool = True) -> Dict[str, Any]:
+        n_div = max(1, int(count))
+
+        pts: List[Vec3] = []
+        is_closed = False
+        if isinstance(curve, CurveData) and curve.points:
+            pts = [Vec3(p.x, p.y, p.z) for p in curve.points]
+            is_closed = curve.closed
+        elif isinstance(curve, MeshData):
+            c = curve.perimeter_as_curve()
+            pts = [Vec3(p.x, p.y, p.z) for p in c.points]
+            is_closed = c.closed
+        elif isinstance(curve, dict) and "outer" in curve:
+            pts = [Vec3(float(p[0]), float(p[1]), float(p[2])) for p in curve.get("outer", [])]
+            is_closed = True
+        elif isinstance(curve, list) and curve:
+            for p in curve:
+                if isinstance(p, Vec3):
+                    pts.append(p)
+                elif isinstance(p, (list, tuple)) and len(p) >= 3:
+                    pts.append(Vec3(float(p[0]), float(p[1]), float(p[2])))
+            is_closed = False
+
+        if len(pts) < 2:
+            pts = [Vec3(0.0, 0.0, 0.0), Vec3(10.0, 0.0, 0.0)]
+            is_closed = False
+
+        poly_pts = list(pts)
+        if is_closed and (poly_pts[0].distance_to(poly_pts[-1]) > 1e-4):
+            poly_pts.append(poly_pts[0])
+
+        cum_lens: List[float] = [0.0]
+        for i in range(len(poly_pts) - 1):
+            seg_len = poly_pts[i].distance_to(poly_pts[i + 1])
+            cum_lens.append(cum_lens[-1] + seg_len)
+
+        total_len = cum_lens[-1]
+        out_curve = CurveData(points=pts, closed=is_closed)
+        if total_len < 1e-9:
+            return {
+                "points": [poly_pts[0]],
+                "tangents": [Vec3(1.0, 0.0, 0.0)],
+                "segments": [],
+                "params": [0.0],
+                "curve": out_curve,
+            }
+
+        div_points: List[Vec3] = []
+        div_tangents: List[Vec3] = []
+        div_params: List[float] = []
+
+        if is_closed:
+            targets = [i * (total_len / n_div) for i in range(n_div)]
+        else:
+            if include_ends:
+                targets = [i * (total_len / n_div) for i in range(n_div + 1)]
+            else:
+                targets = [(i + 1) * (total_len / (n_div + 1)) for i in range(n_div)]
+
+        def sample_at(dist: float) -> Tuple[Vec3, Vec3]:
+            idx = 0
+            while idx < len(cum_lens) - 2 and cum_lens[idx + 1] < dist:
+                idx += 1
+            l0, l1 = cum_lens[idx], cum_lens[idx + 1]
+            p0, p1 = poly_pts[idx], poly_pts[idx + 1]
+            seg_l = max(1e-9, l1 - l0)
+            t = max(0.0, min(1.0, (dist - l0) / seg_l))
+            pt = Vec3(p0.x + t * (p1.x - p0.x), p0.y + t * (p1.y - p0.y), p0.z + t * (p1.z - p0.z))
+            tang = (p1 - p0).normalized()
+            return pt, tang
+
+        for d in targets:
+            p, t = sample_at(d)
+            div_points.append(p)
+            div_tangents.append(t)
+            div_params.append(round(d / total_len, 6))
+
+        segments: List[CurveData] = []
+        if is_closed:
+            for i in range(len(div_points)):
+                p_curr = div_points[i]
+                p_next = div_points[(i + 1) % len(div_points)]
+                segments.append(CurveData(points=[p_curr, p_next], closed=False))
+        else:
+            for i in range(len(div_points) - 1):
+                segments.append(CurveData(points=[div_points[i], div_points[i + 1]], closed=False))
+
+        return {
+            "points": div_points,
+            "tangents": div_tangents,
+            "segments": segments,
+            "params": div_params,
+            "curve": out_curve,
+        }
+
+
+# ============================================================================
+# 14. Offset Curve Node
+# ============================================================================
+@register_node
+class OffsetCurveNode(BaseNode):
+    type_id = "curve.offset"
+    title = "Offset Curve"
+    category = "Curves"
+    description = (
+        "Offset a curve or surface in its plane (like walls or window frames in IngeTrazo).\n"
+        "Outputs the offset curve, a frame mesh, and the offset curve face (clean planar face, no triangulation)."
+    )
+    header_color = (68, 108, 179)
+
+    inputs = [
+        InputSpec("curve", "Curve / Surface", SocketType.ANY, default=None, hide_widget=True),
+        InputSpec("distance", "Distance (m)", SocketType.FLOAT, default=0.2, min_val=-10.0, max_val=10.0, step=0.05),
+        InputSpec("inset", "Inset (Inward)", SocketType.BOOL, default=True),
+    ]
+    outputs = [
+        OutputSpec("curve", "Offset Curve", SocketType.CURVE),
+        OutputSpec("frame", "Frame", SocketType.MESH),
+        OutputSpec("face", "Curve Face", SocketType.MESH),
+    ]
+
+    @staticmethod
+    def _line_intersect_2d(p0: Vec3, u: Vec3, p1: Vec3, v: Vec3, n: Vec3) -> Optional[Vec3]:
+        cross_uv = u.cross(v)
+        denom = cross_uv.dot(n)
+        if abs(denom) < 1e-7:
+            return Vec3((p0.x + p1.x) * 0.5, (p0.y + p1.y) * 0.5, (p0.z + p1.z) * 0.5)
+        diff = p1 - p0
+        diff_cross_v = diff.cross(v)
+        s = diff_cross_v.dot(n) / denom
+        return Vec3(p0.x + s * u.x, p0.y + s * u.y, p0.z + s * u.z)
+
+    def compute(self, curve: Any = None, distance: float = 0.2, inset: bool = True) -> Dict[str, Any]:
+        d = float(distance)
+        if inset:
+            d = abs(d)
+        else:
+            d = -abs(d)
+
+        pts: List[Vec3] = []
+        is_closed = True
+
+        if isinstance(curve, CurveData) and curve.points:
+            pts = [Vec3(p.x, p.y, p.z) for p in curve.points]
+            is_closed = curve.closed
+        elif isinstance(curve, MeshData):
+            c = curve.perimeter_as_curve()
+            pts = [Vec3(p.x, p.y, p.z) for p in c.points]
+            is_closed = True
+        elif isinstance(curve, dict) and "outer" in curve:
+            pts = [Vec3(float(p[0]), float(p[1]), float(p[2])) for p in curve.get("outer", [])]
+            is_closed = True
+        elif isinstance(curve, list) and curve:
+            for p in curve:
+                if isinstance(p, Vec3):
+                    pts.append(p)
+                elif isinstance(p, (list, tuple)) and len(p) >= 3:
+                    pts.append(Vec3(float(p[0]), float(p[1]), float(p[2])))
+            is_closed = True
+
+        # Default fallback: 2.0m x 1.5m window profile at Z=1.0m
+        if len(pts) < 3:
+            pts = [
+                Vec3(0.0, 0.0, 1.0),
+                Vec3(2.0, 0.0, 1.0),
+                Vec3(2.0, 0.0, 2.5),
+                Vec3(0.0, 0.0, 2.5),
+            ]
+            is_closed = True
+
+        n_pts = len(pts)
+
+        nx = ny = nz = 0.0
+        for i in range(n_pts):
+            p0 = pts[i]
+            p1 = pts[(i + 1) % n_pts]
+            nx += (p0.y - p1.y) * (p0.z + p1.z)
+            ny += (p0.z - p1.z) * (p0.x + p1.x)
+            nz += (p0.x - p1.x) * (p0.y + p1.y)
+        norm_len = math.sqrt(nx * nx + ny * ny + nz * nz)
+        if norm_len < 1e-9:
+            normal = Vec3(0.0, 0.0, 1.0)
+        else:
+            normal = Vec3(nx / norm_len, ny / norm_len, nz / norm_len)
+
+        offset_pts: List[Vec3] = []
+
+        if is_closed and n_pts >= 3:
+            offset_lines: List[Tuple[Vec3, Vec3]] = []
+            for i in range(n_pts):
+                a = pts[i]
+                b = pts[(i + 1) % n_pts]
+                edge = b - a
+                e_dir = edge.normalized()
+                inward = normal.cross(e_dir).normalized()
+                line_pt = Vec3(a.x + inward.x * d, a.y + inward.y * d, a.z + inward.z * d)
+                offset_lines.append((line_pt, e_dir))
+
+            for i in range(n_pts):
+                p0, u = offset_lines[(i - 1) % n_pts]
+                p1, v = offset_lines[i]
+                pt = self._line_intersect_2d(p0, u, p1, v, normal)
+                if pt is None:
+                    pt = pts[i]
+                offset_pts.append(pt)
+
+            for i in range(n_pts):
+                orig_len = pts[i].distance_to(pts[(i + 1) % n_pts])
+                new_len = offset_pts[i].distance_to(offset_pts[(i + 1) % n_pts])
+                if new_len < 1e-4 or pts[i].distance_to(offset_pts[i]) > 10.0 * max(0.1, abs(d)):
+                    centroid = Vec3(sum(p.x for p in pts) / n_pts, sum(p.y for p in pts) / n_pts, sum(p.z for p in pts) / n_pts)
+                    scale_f = max(0.05, 1.0 - (d / max(1.0, orig_len)))
+                    offset_pts = [Vec3(centroid.x + (p.x - centroid.x) * scale_f,
+                                       centroid.y + (p.y - centroid.y) * scale_f,
+                                       centroid.z + (p.z - centroid.z) * scale_f) for p in pts]
+                    break
+        else:
+            for i in range(n_pts):
+                if i == 0:
+                    tang = (pts[1] - pts[0]).normalized()
+                elif i == n_pts - 1:
+                    tang = (pts[-1] - pts[-2]).normalized()
+                else:
+                    tang = (pts[i + 1] - pts[i - 1]).normalized()
+                inward = normal.cross(tang).normalized()
+                offset_pts.append(Vec3(pts[i].x + inward.x * d, pts[i].y + inward.y * d, pts[i].z + inward.z * d))
+
+        offset_curve = CurveData(points=[Vec3(p.x, p.y, p.z) for p in offset_pts], closed=is_closed)
+
+        frame_verts: List[Tuple[float, float, float]] = []
+        frame_faces: List[List[int]] = []
+        frame_edges: List[Tuple[int, int]] = []
+
+        if is_closed and n_pts >= 3:
+            def polygon_area(poly: List[Vec3], norm: Vec3) -> float:
+                nx = ny = nz = 0.0
+                k_len = len(poly)
+                for k in range(k_len):
+                    p0 = poly[k]
+                    p1 = poly[(k + 1) % k_len]
+                    nx += (p0.y - p1.y) * (p0.z + p1.z)
+                    ny += (p0.z - p1.z) * (p0.x + p1.x)
+                    nz += (p0.x - p1.x) * (p0.y + p1.y)
+                return (nx * norm.x + ny * norm.y + nz * norm.z) * 0.5
+
+            def ensure_ccw(poly: List[Vec3], norm: Vec3) -> List[Vec3]:
+                if polygon_area(poly, norm) < 0:
+                    return list(reversed(poly))
+                return poly
+
+            pts_ccw = ensure_ccw(pts, normal)
+            off_ccw = ensure_ccw(offset_pts, normal)
+
+            area_pts = polygon_area(pts_ccw, normal)
+            area_off = polygon_area(off_ccw, normal)
+
+            if area_off > area_pts:
+                # Outward offset: offset_pts is larger outer ring, original pts is inner hole
+                outer_loop = off_ccw
+                hole_loop = pts_ccw
+            else:
+                # Inward offset: original pts is larger outer ring, offset_pts is inner hole
+                outer_loop = pts_ccw
+                hole_loop = off_ccw
+
+            n_out = len(outer_loop)
+            n_hole = len(hole_loop)
+
+            for p in outer_loop:
+                frame_verts.append((p.x, p.y, p.z))
+            for p in hole_loop:
+                frame_verts.append((p.x, p.y, p.z))
+
+            # Single continuous annular face loop (outer loop CCW + bridge slit + inner hole CW + bridge back)
+            single_face = list(range(n_out)) + [0, n_out] + [n_out + ((n_hole - 1 - j) % n_hole) for j in range(n_hole)] + [n_out, 0]
+            frame_faces.append(single_face)
+
+            # Only outer and inner boundary edges (NO radial dividing curves/edges!)
+            for i in range(n_out):
+                frame_edges.append((i, (i + 1) % n_out))
+            for i in range(n_hole):
+                frame_edges.append((n_out + i, n_out + (i + 1) % n_hole))
+
+            frame_mesh = MeshData(
+                vertices=frame_verts,
+                faces=frame_faces,
+                edges=frame_edges,
+                name="Frame",
+                material_name="Frame",
+                color=(0.22, 0.24, 0.28),
+                face_materials=["Frame"] * len(frame_faces),
+                face_colors=[(0.22, 0.24, 0.28)] * len(frame_faces),
+                outer=[(p.x, p.y, p.z) for p in outer_loop],
+                holes=[[(p.x, p.y, p.z) for p in hole_loop]],
+                holed_faces=[(list(range(n_out)), [list(range(n_out, n_out + n_hole))])],
+            )
+        else:
+            for p in pts:
+                frame_verts.append((p.x, p.y, p.z))
+            for p in offset_pts:
+                frame_verts.append((p.x, p.y, p.z))
+
+            # Open curve ribbon (e.g. arc, polyline, line):
+            # Form ONE single continuous planar face loop without interior radial dividing edges
+            # Loop travels: 0 -> 1 -> ... -> n_pts - 1, across to 2*n_pts - 1 -> ... -> n_pts, back to 0
+            ribbon_face = list(range(n_pts)) + list(range(2 * n_pts - 1, n_pts - 1, -1))
+
+            # Orient ribbon_face so its normal matches the curve plane's normal
+            poly_nx = poly_ny = poly_nz = 0.0
+            m_poly = len(ribbon_face)
+            for k in range(m_poly):
+                pa = frame_verts[ribbon_face[k]]
+                pb = frame_verts[ribbon_face[(k + 1) % m_poly]]
+                poly_nx += (pa[1] - pb[1]) * (pa[2] + pb[2])
+                poly_ny += (pa[2] - pb[2]) * (pa[0] + pb[0])
+                poly_nz += (pa[0] - pb[0]) * (pa[1] + pb[1])
+
+            if (poly_nx * normal.x + poly_ny * normal.y + poly_nz * normal.z) < 0:
+                ribbon_face.reverse()
+
+            frame_faces.append(ribbon_face)
+
+            # Perimeter boundary edges only (outer curve + end cap + inner curve + start cap; ZERO radial dividing edges!)
+            for i in range(n_pts - 1):
+                frame_edges.append((i, i + 1))
+                frame_edges.append((n_pts + i, n_pts + i + 1))
+            frame_edges.append((0, n_pts))
+            frame_edges.append((n_pts - 1, 2 * n_pts - 1))
+
+            frame_mesh = MeshData(
+                vertices=frame_verts,
+                faces=frame_faces,
+                edges=frame_edges,
+                name="Frame",
+                material_name="Frame",
+                color=(0.22, 0.24, 0.28),
+                face_materials=["Frame"] * len(frame_faces),
+                face_colors=[(0.22, 0.24, 0.28)] * len(frame_faces),
+                outer=[frame_verts[idx] for idx in ribbon_face],
+                holes=[],
+                holed_faces=[],
+            )
+
+        face_verts: List[Tuple[float, float, float]] = [(p.x, p.y, p.z) for p in offset_pts]
+        face_faces: List[List[int]] = []
+        face_edges: List[Tuple[int, int]] = []
+
+        if is_closed and len(offset_pts) >= 3:
+            m_off = len(offset_pts)
+            # Clean single planar face (NO fan triangulation spokes!)
+            face_faces.append(list(range(m_off)))
+            for i in range(m_off):
+                face_edges.append((i, (i + 1) % m_off))
+        elif len(offset_pts) >= 2:
+            for i in range(len(offset_pts) - 1):
+                face_edges.append((i, i + 1))
+
+        curve_face = MeshData(
+            vertices=face_verts,
+            faces=face_faces,
+            edges=face_edges,
+            name="OffsetCurveFace",
+            material_name="Face",
+            color=(0.55, 0.78, 0.92),
+            face_materials=["Face"] * len(face_faces),
+            face_colors=[(0.55, 0.78, 0.92)] * len(face_faces),
+        )
+
+        return {
+            "curve": offset_curve,
+            "frame": frame_mesh,
+            "face": curve_face,
+        }

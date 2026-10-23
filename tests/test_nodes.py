@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: GPL-3.0-or-later
+﻿# SPDX-License-Identifier: GPL-3.0-or-later
 """Automated unit test suite for the IngeTrazo Parametric Node Editor."""
 
 import math
@@ -1103,6 +1103,290 @@ class TestNewNodesAndUIEnhancements(unittest.TestCase):
         self.assertIn("QCheckBox::indicator", w.styleSheet())
         self.assertIn("border:", w.styleSheet())
 
+    def test_select_curve_node(self):
+        """Verify Select Curve node in Scene tab, multi-curve selection, and card buttons."""
+        self.assertIn("scene.select_curve", NODE_REGISTRY)
+        self.assertIn("curve.select", NODE_REGISTRY)
+        node_cls = NODE_REGISTRY["scene.select_curve"]
+        node = node_cls()
+        self.assertEqual(node.category, "Scene")
+
+        res = node.compute()
+        curve = res.get("curve")
+        self.assertIsInstance(curve, CurveData)
+        self.assertGreater(len(curve.points), 0)
+        self.assertGreater(res.get("length"), 0.0)
+        self.assertFalse(res.get("closed"))
+        self.assertEqual(res.get("count"), 1)
+
+        # Multi-curve storage test
+        node.param_values["stored_curves"] = [
+            {"points": [(0, 0, 0), (10, 0, 0)], "closed": False, "length": 10.0},
+            {"points": [(0, 5, 0), (8, 5, 0)], "closed": False, "length": 8.0},
+        ]
+        res_multi = node.compute()
+        self.assertEqual(res_multi.get("count"), 2)
+        self.assertEqual(len(res_multi.get("curves")), 2)
+        self.assertAlmostEqual(res_multi.get("length"), 18.0)
+
+        # Test card buttons
+        btns = node.get_action_buttons()
+        self.assertEqual(len(btns), 2)
+        self.assertEqual(btns[0]["id"], "btn_set_curve")
+        self.assertEqual(btns[1]["id"], "btn_clear_curve")
+
+    def test_divide_curve_node(self):
+        """Verify Divide Curve node divides polyline and accepts Face mesh input."""
+        self.assertIn("curve.divide", NODE_REGISTRY)
+        node_cls = NODE_REGISTRY["curve.divide"]
+        node = node_cls()
+
+        # Open curve test
+        open_c = CurveData(points=[Vec3(0, 0, 0), Vec3(10, 0, 0)], closed=False)
+        res = node.compute(curve=open_c, count=5, include_ends=True)
+        pts = res.get("points")
+        self.assertEqual(len(pts), 6) # 5 segments -> 6 points
+        self.assertAlmostEqual(pts[0].x, 0.0)
+        self.assertAlmostEqual(pts[-1].x, 10.0)
+        self.assertEqual(len(res.get("segments")), 5)
+        self.assertEqual(len(res.get("tangents")), 6)
+        self.assertIsInstance(res.get("curve"), CurveData)
+
+        # Face MeshData input test (dividing face perimeter)
+        face_mesh = CurveData(
+            points=[Vec3(0, 0, 0), Vec3(10, 0, 0), Vec3(10, 10, 0), Vec3(0, 10, 0)],
+            closed=True
+        ).to_mesh_face()
+        res_face = node.compute(curve=face_mesh, count=8)
+        self.assertEqual(len(res_face.get("points")), 8)
+        self.assertEqual(len(res_face.get("segments")), 8)
+
+    def test_offset_curve_node(self):
+        """Verify Offset Curve outputs strictly curve, frame, and non-triangulated face."""
+        self.assertIn("curve.offset", NODE_REGISTRY)
+        node_cls = NODE_REGISTRY["curve.offset"]
+        node = node_cls()
+
+        # Window rectangle 4m x 3m
+        rect_pts = [Vec3(0, 0, 1), Vec3(4, 0, 1), Vec3(4, 0, 4), Vec3(0, 0, 4)]
+        rect_c = CurveData(points=rect_pts, closed=True)
+        res = node.compute(curve=rect_c, distance=0.2, inset=True)
+
+        # Check strict 3 outputs
+        self.assertEqual(set(res.keys()), {"curve", "frame", "face"})
+
+        off_c = res.get("curve")
+        self.assertIsInstance(off_c, CurveData)
+        self.assertEqual(len(off_c.points), 4)
+
+        frame = res.get("frame")
+        self.assertIsInstance(frame, MeshData)
+        self.assertEqual(len(frame.faces), 1) # Single annular face (no radial internal dividing edges)
+        self.assertEqual(len(frame.edges), 8) # 4 outer edges + 4 inner edges, 0 radial edges
+        self.assertEqual(frame.name, "Frame")
+        self.assertIsNotNone(frame.outer)
+        self.assertEqual(len(frame.holes), 1)
+
+        face = res.get("face")
+        self.assertIsInstance(face, MeshData)
+        self.assertEqual(len(face.faces), 1) # Single planar face (NO fan triangulation spokes!)
+        self.assertEqual(len(face.faces[0]), 4) # 4 corner vertices in N-gon
+
+        # Outward offset (inset=False)
+        res_out = node.compute(curve=rect_c, distance=0.2, inset=False)
+        frame_out = res_out.get("frame")
+        self.assertIsInstance(frame_out, MeshData)
+        self.assertEqual(len(frame_out.faces), 1)
+        self.assertEqual(len(frame_out.edges), 8)
+        self.assertEqual(len(frame_out.holes), 1)
+        # Verify outer loop is larger than inner hole
+        outer_p0 = frame_out.outer[0]
+        hole_p0 = frame_out.holes[0][0]
+        self.assertGreater(outer_p0[1], hole_p0[1] - 1.0)
+
+    def test_reference_face_multi_face(self):
+        """Verify Reference Face supports multiple stored faces and combined mesh output."""
+        node_cls = NODE_REGISTRY["scene.reference_face"]
+        node = node_cls()
+
+        # Multi-face storage
+        node.param_values["stored_faces"] = [
+            {"outer": [(0, 0, 0), (4, 0, 0), (4, 4, 0), (0, 4, 0)], "holes": []},
+            {"outer": [(6, 0, 0), (10, 0, 0), (10, 4, 0), (6, 4, 0)], "holes": []},
+        ]
+        res = node.compute()
+        self.assertEqual(res["count"], 2)
+        self.assertEqual(len(res["surfaces"]), 2)
+        self.assertEqual(len(res["meshes"]), 2)
+        self.assertEqual(len(res["outers"]), 2)
+        self.assertEqual(len(res["mesh"].faces), 2)
+
+    def test_surface_subdivide_node(self):
+        """Verify Surface Subdivide subdivides face into grid of panels and boundary curves."""
+        self.assertIn("surface.subdivide", NODE_REGISTRY)
+        node_cls = NODE_REGISTRY["surface.subdivide"]
+        node = node_cls()
+
+        # Quad surface 12m x 8m
+        quad_face = {
+            "outer": [(0, 0, 0), (12, 0, 0), (12, 8, 0), (0, 8, 0)],
+            "holes": [],
+        }
+        res = node.compute(surface=quad_face, u_count=3, v_count=2, frame_width=0.05)
+        combined_mesh = res.get("mesh")
+        self.assertIsInstance(combined_mesh, MeshData)
+        self.assertEqual(len(combined_mesh.faces), 6) # 3 x 2 = 6 sub-faces
+
+        faces = res.get("faces")
+        self.assertEqual(len(faces), 6)
+        self.assertEqual(len(res.get("curves")), 6)
+        self.assertEqual(len(res.get("centers")), 6)
+        self.assertEqual(len(res.get("points")), (3 + 1) * (2 + 1)) # 4 x 3 = 12 grid vertices
+
+    def test_loft_node(self):
+        """Verify Loft node creates smooth 3D transitional solid between section curves."""
+        self.assertIn("solid.loft", NODE_REGISTRY)
+        node_cls = NODE_REGISTRY["solid.loft"]
+        node = node_cls()
+
+        # Section 1: 4m x 4m rectangle at Z=0
+        s1 = CurveData(points=[Vec3(-2, -2, 0), Vec3(2, -2, 0), Vec3(2, 2, 0), Vec3(-2, 2, 0)], closed=True)
+        # Section 2: circle r=2m at Z=4
+        s2 = CurveData(points=[Vec3(2.0 * math.cos(math.pi * 2.0 * i / 16), 2.0 * math.sin(math.pi * 2.0 * i / 16), 4) for i in range(16)], closed=True)
+
+        res = node.compute(sections=[s1, s2], cap_ends=True, rebuild_count=16)
+        mesh = res.get("mesh")
+        self.assertIsInstance(mesh, MeshData)
+        self.assertGreater(len(mesh.vertices), 0)
+        # 16 quads around + 2 end caps = 18 faces
+        self.assertEqual(len(mesh.faces), 18)
+        self.assertEqual(len(res.get("curves")), 2)
+
+
+    def test_extrude_face_node(self):
+        """Verify Extrude Face extrudes planar faces, surfaces, and annular frames with holes into 3D solids."""
+        self.assertIn("solid.extrude_face", NODE_REGISTRY)
+        extrude_face_cls = NODE_REGISTRY["solid.extrude_face"]
+        node = extrude_face_cls()
+
+        # 1. Extrude simple planar face
+        face_mesh = MeshData(
+            vertices=[(0, 0, 0), (4, 0, 0), (4, 3, 0), (0, 3, 0)],
+            faces=[[0, 1, 2, 3]],
+            edges=[(0, 1), (1, 2), (2, 3), (3, 0)],
+        )
+        res1 = node.compute(face=face_mesh, height=2.5, capped=True)
+        solid1 = res1.get("solid")
+        self.assertIsInstance(solid1, MeshData)
+        self.assertGreater(len(solid1.vertices), 0)
+        # Check 4 side walls + 2 end caps = 6 faces
+        self.assertEqual(len(solid1.faces), 6)
+
+        # 2. Extrude annular frame from OffsetCurveNode (face with hole, no radial inner curves)
+        offset_cls = NODE_REGISTRY["curve.offset"]
+        off_node = offset_cls()
+        rect_pts = [Vec3(0, 0, 0), Vec3(2, 0, 0), Vec3(2, 2, 0), Vec3(0, 2, 0)]
+        off_res = off_node.compute(curve=CurveData(points=rect_pts, closed=True), distance=0.2, inset=True)
+        frame_mesh = off_res["frame"]
+        self.assertEqual(len(frame_mesh.faces), 1)
+        self.assertEqual(len(frame_mesh.edges), 8)
+
+        frame_solid = node.compute(face=frame_mesh, height=0.1, capped=True)["solid"]
+        self.assertIsInstance(frame_solid, MeshData)
+        # 4 outer walls + 4 inner hole walls + top cap + bottom cap = 10 clean faces (zero diagonal triangulation wires!)
+        self.assertEqual(len(frame_solid.faces), 10)
+        self.assertEqual(len(frame_solid.holed_faces), 2)
+
+        # 3. Verify ExtrudeSolidNode (solid.extrude) polyglot acceptance of faces
+        extrude_solid_cls = NODE_REGISTRY["solid.extrude"]
+        ext_solid_node = extrude_solid_cls()
+        res_from_solid = ext_solid_node.compute(curve=frame_mesh, height=0.1, capped=True)
+        self.assertIn("solid", res_from_solid)
+        self.assertEqual(len(res_from_solid["solid"].faces), 10)
+        self.assertEqual(len(res_from_solid["solid"].holed_faces), 2)
+
+
+    def test_preview_node(self):
+        """Verify Preview node correctly formats geometry for clean viewport preview."""
+        self.assertIn("scene.preview", NODE_REGISTRY)
+        prev_cls = NODE_REGISTRY["scene.preview"]
+        node = prev_cls()
+
+        # Test with MeshData
+        mesh = MeshData(
+            vertices=[(0, 0, 0), (2, 0, 0), (2, 2, 0), (0, 2, 0)],
+            faces=[[0, 1, 2, 3]],
+            name="TestMesh",
+        )
+        res = node.compute(geometry=mesh, color=(0.1, 0.8, 0.3), opacity=0.85, visible=True)
+        out_mesh = res.get("preview")
+        self.assertIsInstance(out_mesh, MeshData)
+        self.assertEqual(out_mesh.color, (0.1, 0.8, 0.3))
+        self.assertEqual(out_mesh.opacity, 0.85)
+
+        # Test visibility toggle off
+        res_hidden = node.compute(geometry=mesh, visible=False)
+        self.assertIsNone(res_hidden.get("preview"))
+
+        # Test with CurveData
+        curve = CurveData(points=[Vec3(0, 0, 0), Vec3(5, 5, 0)], closed=False)
+        res_c = node.compute(geometry=curve, color=(1.0, 0.5, 0.0))
+        out_c_mesh = res_c.get("preview")
+        self.assertIsInstance(out_c_mesh, MeshData)
+        self.assertEqual(out_c_mesh.color, (1.0, 0.5, 0.0))
+
+    def test_no_duplicate_nodes_on_shelf(self):
+        """Verify NODE_REGISTRY aliases do not cause repeated buttons on ComponentShelf."""
+        cat_map = {}
+        seen_classes = set()
+        for node_cls in NODE_REGISTRY.values():
+            if node_cls in seen_classes:
+                continue
+            seen_classes.add(node_cls)
+            cat = getattr(node_cls, "category", "Misc")
+            cat_map.setdefault(cat, []).append(node_cls)
+
+        scene_nodes = cat_map.get("Scene", [])
+        scene_node_names = [cls.__name__ for cls in scene_nodes]
+        # SelectCurveNode must appear exactly once in Scene category
+        self.assertEqual(scene_node_names.count("SelectCurveNode"), 1)
+
+
+    def test_node_search_popup_categorized_tree(self):
+        """Verify NodeSearchPopup groups nodes under category titles and handles search/navigation."""
+        from PySide6.QtWidgets import QApplication
+        from PySide6.QtCore import Qt
+        import ui_canvas
+
+        app = QApplication.instance() or QApplication([])
+        picked = []
+        popup = ui_canvas.NodeSearchPopup(parent=None, on_pick=lambda tid: picked.append(tid))
+
+        # Check top-level category items exist and are not empty
+        self.assertGreater(popup.tree_widget.topLevelItemCount(), 0)
+
+        # 1. Check all top-level items are categories with children
+        for i in range(popup.tree_widget.topLevelItemCount()):
+            cat_item = popup.tree_widget.topLevelItem(i)
+            self.assertGreater(cat_item.childCount(), 0)
+            self.assertIsNone(cat_item.data(0, Qt.ItemDataRole.UserRole))
+
+        # 2. Test query filtering
+        popup._populate("extrude face")
+        solids_cat = None
+        for i in range(popup.tree_widget.topLevelItemCount()):
+            ci = popup.tree_widget.topLevelItem(i)
+            if "solid" in ci.text(0).lower():
+                solids_cat = ci
+                break
+        self.assertIsNotNone(solids_cat)
+        child_titles = [solids_cat.child(j).text(0) for j in range(solids_cat.childCount())]
+        self.assertTrue(any("Extrude Face" in t for t in child_titles))
+
+        # 3. Test selection and pick
+        popup._accept_current()
+        self.assertEqual(len(picked), 1)
+        self.assertEqual(picked[0], "solid.extrude_face")
 
 
 if __name__ == "__main__":

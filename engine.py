@@ -269,33 +269,45 @@ class GraphEngine:
         meshes: List[MeshData] = []
         points: List[Vec3] = []
 
-        def _extract_preview(val: Any, default_name: str = "Shape") -> None:
+        def _extract_preview(val: Any, default_name: str = "Shape", source_node_id: Optional[str] = None) -> None:
             if val is None:
                 return
             if isinstance(val, MeshData):
                 if val.vertices or val.edges:
-                    meshes.append(val)
+                    m = val.copy()
+                    if source_node_id:
+                        m.source_node_id = source_node_id
+                    meshes.append(m)
             elif isinstance(val, CurveData):
                 if val.points:
-                    meshes.append(val.to_wire_mesh(name=f"{default_name}_Curve"))
+                    m = val.to_wire_mesh(name=f"{default_name}_Curve")
+                    if source_node_id:
+                        m.source_node_id = source_node_id
+                    meshes.append(m)
             elif isinstance(val, Vec3):
                 points.append(val)
             elif isinstance(val, dict):
                 if "outer" in val and isinstance(val["outer"], list):
                     outer_pts = [p if isinstance(p, Vec3) else Vec3(*p) for p in val["outer"]]
-                    meshes.append(CurveData(points=outer_pts, closed=True).to_wire_mesh(name="Face_Outer"))
+                    m = CurveData(points=outer_pts, closed=True).to_wire_mesh(name="Face_Outer")
+                    if source_node_id:
+                        m.source_node_id = source_node_id
+                    meshes.append(m)
                 if "holes" in val and isinstance(val["holes"], list):
                     for idx, h in enumerate(val["holes"]):
                         h_pts = [p if isinstance(p, Vec3) else Vec3(*p) for p in h]
-                        meshes.append(CurveData(points=h_pts, closed=True).to_wire_mesh(name=f"Face_Hole_{idx+1}"))
+                        m = CurveData(points=h_pts, closed=True).to_wire_mesh(name=f"Face_Hole_{idx+1}")
+                        if source_node_id:
+                            m.source_node_id = source_node_id
+                        meshes.append(m)
             elif isinstance(val, (list, tuple)):
                 for item in val:
-                    _extract_preview(item, default_name)
+                    _extract_preview(item, default_name, source_node_id=source_node_id)
 
         active_output_sources = set()
         for node in self.nodes.values():
             if (
-                getattr(node, "is_output_node", False)
+                (getattr(node, "is_output_node", False) or getattr(node, "type_id", "") == "scene.preview")
                 and getattr(node, "is_enabled", True)
                 and getattr(node, "is_preview_visible", True)
                 and node.param_values.get("enabled", True)
@@ -311,17 +323,26 @@ class GraphEngine:
             if node.error_message:
                 continue
 
+            if getattr(node, "type_id", "") == "scene.preview":
+                src_ids = [w.src_node for w in self.wires if w.dst_node == node.id]
+                source_id = src_ids[0] if src_ids else node.id
+                val = node.cached_outputs.get("preview")
+                _extract_preview(val, default_name="Preview", source_node_id=source_id)
+                continue
+
             if getattr(node, "is_output_node", False):
                 if not node.param_values.get("enabled", True):
                     continue
-                _extract_preview(node.cached_outputs.get("mesh_out"), default_name=node.title or "Output")
+                src_ids = [w.src_node for w in self.wires if w.dst_node == node.id]
+                source_id = src_ids[0] if src_ids else node.id
+                _extract_preview(node.cached_outputs.get("mesh_out"), default_name=node.title or "Output", source_node_id=source_id)
                 continue
 
             for out_spec in node.outputs:
                 if (node.id, out_spec.id) in active_output_sources:
                     continue
                 val = node.cached_outputs.get(out_spec.id)
-                _extract_preview(val, default_name=node.title or out_spec.label)
+                _extract_preview(val, default_name=node.title or out_spec.label, source_node_id=node.id)
 
         return meshes, points
 

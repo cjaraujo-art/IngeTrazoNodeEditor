@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: GPL-3.0-or-later
+﻿# SPDX-License-Identifier: GPL-3.0-or-later
 """PySide6 Interactive Node Graph Canvas with Blender-Style Value Sliders."""
 
 from __future__ import annotations
@@ -9,7 +9,7 @@ import os
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from PySide6.QtCore import QMimeData, QPoint, QPointF, QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QMimeData, QPoint, QPointF, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import (
     QBrush, QColor, QContextMenuEvent, QCursor, QDrag, QFont, QIcon, QKeyEvent, QMouseEvent,
     QPainter, QPainterPath, QPainterPathStroker, QPen, QPixmap, QWheelEvent,
@@ -20,7 +20,7 @@ from PySide6.QtWidgets import (
     QGraphicsScene, QGraphicsView, QGridLayout, QGroupBox, QHBoxLayout, QLabel,
     QLineEdit, QListWidget, QListWidgetItem, QMenu, QPlainTextEdit, QPushButton,
     QScrollArea, QSizePolicy, QSlider, QSpinBox, QSplitter, QSplitterHandle, QTabBar,
-    QTabWidget, QToolButton, QVBoxLayout, QWidget,
+    QTabWidget, QToolButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
 try:
@@ -730,7 +730,7 @@ class NodeItem(QGraphicsItem):
                 if sc and hasattr(sc, "engine"):
                     sc.engine.mark_dirty(self.node.id)
                     sc.trigger_eval()
-        elif act == "set_face":
+        elif act in ("set_face", "set_curve"):
             app = self._get_app_handle()
             if hasattr(self.node, "reference_from_selection"):
                 msg, ok = self.node.reference_from_selection(app)
@@ -738,7 +738,7 @@ class NodeItem(QGraphicsItem):
                     sc.engine.mark_dirty(self.node.id)
                     sc.trigger_eval()
                 self._update_badge()
-        elif act == "clear_face":
+        elif act in ("clear_face", "clear_curve"):
             if hasattr(self.node, "clear_reference"):
                 self.node.clear_reference()
                 if sc and hasattr(sc, "engine"):
@@ -748,7 +748,14 @@ class NodeItem(QGraphicsItem):
         elif hasattr(self.node, act):
             fn = getattr(self.node, act)
             if callable(fn):
-                fn()
+                try:
+                    import inspect
+                    if len(inspect.signature(fn).parameters) > 0:
+                        fn(self._get_app_handle())
+                    else:
+                        fn()
+                except Exception:
+                    fn()
                 if sc and hasattr(sc, "engine"):
                     sc.engine.mark_dirty(self.node.id)
                     sc.trigger_eval()
@@ -1206,57 +1213,228 @@ class NodeItem(QGraphicsItem):
 
 
 # ============================================================================
-# QUICK SEARCH PALETTE DIALOG
+# QUICK SEARCH PALETTE DIALOG (CATEGORIZED TREE & SEARCH)
 # ============================================================================
 class NodeSearchPopup(QDialog):
     def __init__(self, parent: QWidget, on_pick: Callable[[str], None]) -> None:
         super().__init__(parent, Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint)
         self.on_pick = on_pick
-        self.setFixedSize(290, 330)
-        self.setStyleSheet("background: #21252b; color: #eceff4; border: 1px solid #4c566a;")
+        self.setFixedSize(340, 420)
+        self.setStyleSheet("""
+            QDialog {
+                background: #21252b;
+                color: #eceff4;
+                border: 1px solid #4c566a;
+                border-radius: 6px;
+            }
+            QLineEdit {
+                background: #282c34;
+                color: #eceff4;
+                padding: 6px 8px;
+                border: 1px solid #3b4252;
+                border-radius: 4px;
+                font-size: 12px;
+            }
+            QLineEdit:focus {
+                border: 1px solid #61afef;
+            }
+            QTreeWidget {
+                background: #1e222a;
+                border: 1px solid #282c34;
+                border-radius: 4px;
+                color: #eceff4;
+                font-size: 12px;
+                outline: none;
+            }
+            QTreeWidget::item {
+                padding: 3px 2px;
+                border-radius: 3px;
+            }
+            QTreeWidget::item:hover {
+                background: #2c313a;
+            }
+            QTreeWidget::item:selected {
+                background: #3b4252;
+                color: #ffffff;
+            }
+            QScrollBar:vertical {
+                background: #1e222a;
+                width: 8px;
+                margin: 2px 0 2px 0;
+            }
+            QScrollBar::handle:vertical {
+                background: #3b4252;
+                min-height: 20px;
+                border-radius: 4px;
+            }
+            QScrollBar::handle:vertical:hover {
+                background: #4c566a;
+            }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+                height: 0px;
+            }
+        """)
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(6)
+
         self.search_box = QLineEdit()
         self.search_box.setPlaceholderText(tr("🔍 Search nodes (type & press Enter)..."))
-        self.search_box.setStyleSheet("background: #282c34; padding: 5px; border: 1px solid #3b4252;")
-        self.list_widget = QListWidget()
-        self.list_widget.setStyleSheet("background: #1e222a; border: none;")
-
         layout.addWidget(self.search_box)
-        layout.addWidget(self.list_widget)
+
+        self.tree_widget = QTreeWidget()
+        self.tree_widget.setHeaderHidden(True)
+        self.tree_widget.setIndentation(16)
+        self.tree_widget.setRootIsDecorated(True)
+        self.tree_widget.setAnimated(True)
+        self.tree_widget.setIconSize(QSize(20, 20))
+        layout.addWidget(self.tree_widget)
+
+        self.search_box.installEventFilter(self)
 
         self.search_box.textChanged.connect(self._populate)
         self.search_box.returnPressed.connect(self._accept_current)
-        self.list_widget.itemActivated.connect(lambda item: self._choose(item))
+        self.tree_widget.itemClicked.connect(self._on_item_clicked)
+        self.tree_widget.itemActivated.connect(self._on_item_activated)
+
         self._populate("")
 
+    def eventFilter(self, obj: Any, event: Any) -> bool:
+        if obj == self.search_box and event.type() == QEvent.Type.KeyPress:
+            key = event.key()
+            if key in (Qt.Key.Key_Down, Qt.Key.Key_Up, Qt.Key.Key_PageDown, Qt.Key.Key_PageUp):
+                self._navigate_tree(key)
+                return True
+        return super().eventFilter(obj, event)
+
+    def _get_all_leaf_items(self) -> List[QTreeWidgetItem]:
+        items: List[QTreeWidgetItem] = []
+        root = self.tree_widget.invisibleRootItem()
+        for i in range(root.childCount()):
+            cat = root.child(i)
+            if not cat.isExpanded():
+                continue
+            for j in range(cat.childCount()):
+                items.append(cat.child(j))
+        return items
+
+    def _navigate_tree(self, key: int) -> None:
+        items = self._get_all_leaf_items()
+        if not items:
+            return
+        curr = self.tree_widget.currentItem()
+        if curr not in items:
+            idx = 0
+        else:
+            idx = items.index(curr)
+            if key in (Qt.Key.Key_Down, Qt.Key.Key_PageDown):
+                idx = (idx + 1) % len(items)
+            elif key in (Qt.Key.Key_Up, Qt.Key.Key_PageUp):
+                idx = (idx - 1) % len(items)
+        next_item = items[idx]
+        self.tree_widget.setCurrentItem(next_item)
+        self.tree_widget.scrollToItem(next_item)
+
     def _populate(self, query: str) -> None:
-        self.list_widget.clear()
+        self.tree_widget.clear()
         q = query.strip().lower()
+
+        categories: Dict[str, List[Tuple[str, type]]] = {}
+        seen_types = set()
         for type_id, cls in sorted(NODE_REGISTRY.items(), key=lambda kv: (kv[1].category, kv[1].title)):
-            tr_cat = tr(cls.category)
-            tr_title = tr(cls.title)
-            label = f"[{tr_cat}]  {tr_title}"
-            if not q or q in label.lower() or q in type_id.lower() or q in cls.title.lower() or q in cls.category.lower():
-                item = QListWidgetItem(label)
-                item.setIcon(get_node_icon(type_id, is_dark=True))
-                item.setData(Qt.ItemDataRole.UserRole, type_id)
-                self.list_widget.addItem(item)
-        if self.list_widget.count() > 0:
-            self.list_widget.setCurrentRow(0)
+            if cls in seen_types and cls.type_id != type_id:
+                continue
+            seen_types.add(cls)
+            cat = cls.category or "General"
+            categories.setdefault(cat, []).append((type_id, cls))
+
+        first_node_item: Optional[QTreeWidgetItem] = None
+
+        for cat, nodes in sorted(categories.items(), key=lambda kv: kv[0]):
+            tr_cat = tr(cat)
+            is_cat_match = bool(q and (q in tr_cat.lower() or q in cat.lower()))
+
+            matching_nodes: List[Tuple[str, type, str]] = []
+            for type_id, cls in nodes:
+                tr_title = tr(cls.title)
+                desc = cls.description or ""
+                if not q or is_cat_match or (
+                    q in tr_title.lower()
+                    or q in cls.title.lower()
+                    or q in type_id.lower()
+                    or q in desc.lower()
+                ):
+                    matching_nodes.append((type_id, cls, tr_title))
+
+            if not matching_nodes:
+                continue
+
+            # Category Header Item
+            cat_item = QTreeWidgetItem(self.tree_widget)
+            cat_item.setText(0, tr_cat)
+            f = cat_item.font(0)
+            f.setBold(True)
+            cat_item.setFont(0, f)
+            cat_item.setForeground(0, QBrush(QColor(97, 175, 239)))
+            cat_item.setBackground(0, QBrush(QColor(37, 41, 49)))
+            cat_item.setSizeHint(0, QSize(0, 26))
+            cat_item.setFlags(Qt.ItemFlag.ItemIsEnabled)
+
+            # Node items under category
+            for type_id, cls, tr_title in matching_nodes:
+                node_item = QTreeWidgetItem(cat_item)
+                node_item.setText(0, tr_title)
+                node_item.setIcon(0, get_node_icon(type_id, is_dark=True))
+                node_item.setData(0, Qt.ItemDataRole.UserRole, type_id)
+                if cls.description:
+                    node_item.setToolTip(0, tr(cls.description))
+                node_item.setSizeHint(0, QSize(0, 24))
+                node_item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
+
+                if first_node_item is None:
+                    first_node_item = node_item
+
+        self.tree_widget.expandAll()
+
+        if first_node_item:
+            self.tree_widget.setCurrentItem(first_node_item)
+
+    def _on_item_clicked(self, item: QTreeWidgetItem, column: int = 0) -> None:
+        type_id = item.data(0, Qt.ItemDataRole.UserRole)
+        if type_id:
+            self._choose(type_id)
+        else:
+            item.setExpanded(not item.isExpanded())
+
+    def _on_item_activated(self, item: QTreeWidgetItem, column: int = 0) -> None:
+        type_id = item.data(0, Qt.ItemDataRole.UserRole)
+        if type_id:
+            self._choose(type_id)
 
     def _accept_current(self) -> None:
-        item = self.list_widget.currentItem()
+        item = self.tree_widget.currentItem()
         if item:
-            self._choose(item)
+            type_id = item.data(0, Qt.ItemDataRole.UserRole)
+            if type_id:
+                self._choose(type_id)
+                return
+            if item.childCount() > 0:
+                first_child = item.child(0)
+                tid = first_child.data(0, Qt.ItemDataRole.UserRole)
+                if tid:
+                    self._choose(tid)
+                    return
+        leaves = self._get_all_leaf_items()
+        if leaves:
+            tid = leaves[0].data(0, Qt.ItemDataRole.UserRole)
+            if tid:
+                self._choose(tid)
 
-    def _choose(self, item: QListWidgetItem) -> None:
-        type_id = item.data(Qt.ItemDataRole.UserRole)
+    def _choose(self, type_id: str) -> None:
         self.accept()
         if type_id:
             self.on_pick(type_id)
-
 
 # ============================================================================
 # GRAPH SCENE & VIEWPORT CANVAS
@@ -2936,7 +3114,11 @@ class NodeRibbonBar(QWidget):
         self.buttons.clear()
 
         cat_map: Dict[str, List[type[BaseNode]]] = {}
+        seen_classes: Set[type[BaseNode]] = set()
         for node_cls in NODE_REGISTRY.values():
+            if node_cls in seen_classes:
+                continue
+            seen_classes.add(node_cls)
             cat = getattr(node_cls, "category", "Misc")
             cat_map.setdefault(cat, []).append(node_cls)
 
@@ -3119,6 +3301,7 @@ class NodeEditorWidget(QWidget):
         get_bridge_error: Optional[Callable[[], Optional[str]]] = None,
         on_load_selection: Optional[Callable[[], None]] = None,
         get_app: Optional[Callable[[], Any]] = None,
+        on_node_selection_changed: Optional[Callable[[List[str]], None]] = None,
         parent: Optional[QWidget] = None,
     ) -> None:
         super().__init__(parent)
@@ -3128,6 +3311,7 @@ class NodeEditorWidget(QWidget):
         self.get_bridge_error = get_bridge_error
         self.on_load_selection = on_load_selection
         self.get_app = get_app
+        self.on_node_selection_changed = on_node_selection_changed
         self._dock: Optional[Any] = None
 
         self._eval_timer = QTimer(self)
@@ -3363,6 +3547,13 @@ class NodeEditorWidget(QWidget):
             selected_nodes = [item for item in self.scene.selectedItems() if isinstance(item, NodeItem)]
         except RuntimeError:
             return
+
+        # Notify viewport selection sync
+        if getattr(self, "on_node_selection_changed", None):
+            try:
+                self.on_node_selection_changed([n.node.id for n in selected_nodes])
+            except Exception:
+                pass
 
         # 1. If explicitly collapsed by user, keep it closed even when nodes are selected
         if getattr(self.splitter, "user_collapsed", False):

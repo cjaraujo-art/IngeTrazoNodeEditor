@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: GPL-3.0-or-later
+﻿# SPDX-License-Identifier: GPL-3.0-or-later
 """IngeTrazo Parametric Node Editor Extension Entry Point."""
 
 from __future__ import annotations
@@ -71,7 +71,7 @@ except Exception:
 
 PLUGIN = {
     "name": "IngeTrazo Parametric Node Editor",
-    "version": "1.4.0",
+    "version": "1.5.0",
     "author": "Community",
     "description": "Visual parametric node editor with Blender-style sliders, live viewport sync, and BIM tagging.",
 }
@@ -82,11 +82,109 @@ PREVIEW_TAG = "_ingetrazo_node_preview"
 def _populate_ingetrazo_mesh(target_mesh: Any, mesh_data: MeshData, scene: Optional[Any] = None) -> None:
     """
     Writes a watertight `MeshData` into an IngeTrazo `core.mesh.Mesh` instance.
-    Uses high-speed `add_faces_bulk` (leveraging the `ingetrazo_core` Rust kernel and NumPy)
-    when available, with graceful fallback to individual face loops.
-    Sets per-face `attrs["mat"]`, `attrs["color"]`, and `attrs["opacity"]`,
-    and registers named materials in `scene.materials` for full BIM and rendering parity.
+    Supports clean SketchUp-style B-Rep faces with holes (zero diagonal triangulation wires),
+    high-speed `add_faces_bulk`, and per-face materials/colors.
     """
+    qvecs: List[QVector3D] = [
+        QVector3D(float(x), float(y), float(z))
+        for (x, y, z) in mesh_data.vertices
+    ]
+
+    def _apply_face_attrs(face: Any, f_idx: int) -> None:
+        if face is None or not hasattr(face, "attrs") or not isinstance(face.attrs, dict):
+            return
+        mat_name = (
+            mesh_data.face_materials[f_idx]
+            if f_idx < len(mesh_data.face_materials) and mesh_data.face_materials[f_idx]
+            else mesh_data.material_name
+        )
+        col = (
+            mesh_data.face_colors[f_idx]
+            if f_idx < len(mesh_data.face_colors) and mesh_data.face_colors[f_idx] is not None
+            else mesh_data.color
+        )
+        op = (
+            mesh_data.face_opacities[f_idx]
+            if f_idx < len(mesh_data.face_opacities) and mesh_data.face_opacities[f_idx] is not None
+            else mesh_data.opacity
+        )
+        if mat_name:
+            face.attrs["mat"] = mat_name
+        if col is not None:
+            face.attrs["color"] = tuple(col)
+        if op is not None:
+            face.attrs["opacity"] = float(op)
+
+        if scene is not None and hasattr(scene, "materials") and isinstance(scene.materials, dict):
+            if mat_name and mat_name not in scene.materials:
+                try:
+                    from core.materials import Material
+                    scene.materials[mat_name] = Material(
+                        name=mat_name,
+                        color=tuple(col) if col else None,
+                        opacity=float(op) if op is not None else None,
+                    )
+                except Exception:
+                    scene.materials[mat_name] = {
+                        "name": mat_name,
+                        "color": tuple(col) if col else None,
+                        "opacity": float(op) if op is not None else None,
+                    }
+
+    # -------------------------------------------------------------------------
+    # 0. Clean SketchUp-Style B-Rep Path (Native IngeTrazo Faces with Holes)
+    # -------------------------------------------------------------------------
+    if mesh_data.holed_faces:
+        # First add side quads (regular polygon faces)
+        for f_idx, face_indices in enumerate(mesh_data.faces):
+            # Skip slit cap loops that are handled cleanly by holed_faces
+            if any(len(face_indices) > 4 for _ in [0]):
+                continue
+            valid_qvecs = [qvecs[idx] for idx in face_indices if 0 <= idx < len(qvecs)]
+            if len(valid_qvecs) >= 3:
+                try:
+                    face = target_mesh.add_face(valid_qvecs)
+                    _apply_face_attrs(face, f_idx)
+                except Exception:
+                    pass
+
+        # Add native cap faces with hole_loops (zero diagonal wire edges!)
+        for h_f_idx, (outer_idx, hole_idx_list) in enumerate(mesh_data.holed_faces):
+            outer_qvecs = [qvecs[i] for i in outer_idx if 0 <= i < len(qvecs)]
+            holes_qvecs = [[qvecs[i] for i in h if 0 <= i < len(qvecs)] for h in hole_idx_list]
+            if len(outer_qvecs) >= 3:
+                try:
+                    face = target_mesh.add_face(outer_qvecs, hole_loops=holes_qvecs if holes_qvecs else None)
+                    _apply_face_attrs(face, len(mesh_data.faces) + h_f_idx)
+                except Exception:
+                    pass
+
+        # Wire edges: only outer rim, inner rim, and wall edges (zero diagonal edges!)
+        for i0, i1 in mesh_data.edges:
+            if 0 <= i0 < len(qvecs) and 0 <= i1 < len(qvecs):
+                try:
+                    target_mesh.add_edge(qvecs[i0], qvecs[i1])
+                except Exception:
+                    pass
+        return
+
+    # Check 2D planar face with outer and holes (e.g. Offset Curve Frame)
+    if mesh_data.outer and mesh_data.holes and len(mesh_data.faces) <= 1:
+        outer_qvecs = [QVector3D(float(p[0]), float(p[1]), float(p[2])) for p in mesh_data.outer]
+        holes_qvecs = [[QVector3D(float(p[0]), float(p[1]), float(p[2])) for p in h] for h in mesh_data.holes]
+        if len(outer_qvecs) >= 3:
+            try:
+                face = target_mesh.add_face(outer_qvecs, hole_loops=holes_qvecs if holes_qvecs else None)
+                _apply_face_attrs(face, 0)
+            except Exception:
+                pass
+        for i0, i1 in mesh_data.edges:
+            if 0 <= i0 < len(qvecs) and 0 <= i1 < len(qvecs):
+                try:
+                    target_mesh.add_edge(qvecs[i0], qvecs[i1])
+                except Exception:
+                    pass
+        return
     # -------------------------------------------------------------------------
     # 1. High-Performance Bulk Bridge (Rust / ingetrazo_core / NumPy)
     # -------------------------------------------------------------------------
@@ -283,6 +381,8 @@ def _make_ingetrazo_group(mesh_data: MeshData, graph_dict: dict, is_preview: boo
     if hasattr(grp, "ext") and isinstance(grp.ext, dict):
         if is_preview:
             grp.ext[PREVIEW_TAG] = True
+            if getattr(mesh_data, "source_node_id", None):
+                grp.ext["node_id"] = mesh_data.source_node_id
         else:
             grp.ext["node_graph"] = graph_dict
 
@@ -350,6 +450,66 @@ class IngeTrazoSceneBridge:
                         fn()
                     except Exception:
                         pass
+
+    def on_nodes_selected(self, selected_node_ids: List[str]) -> None:
+        """Highlights the geometry of currently selected canvas node(s) in the 3D viewport."""
+        sc = self.scene
+        if sc is None or not hasattr(sc, "selection"):
+            return
+
+        # Discard previous preview group selections
+        to_discard = [
+            g for g in sc.selection
+            if hasattr(g, "ext") and isinstance(g.ext, dict) and g.ext.get(PREVIEW_TAG)
+        ]
+        for g in to_discard:
+            sc.selection.discard(g)
+
+        if not selected_node_ids:
+            self._bump_viewport()
+            return
+
+        sel_set = set(selected_node_ids)
+        matching = []
+        for g in getattr(sc, "groups", []):
+            if hasattr(g, "ext") and isinstance(g.ext, dict) and g.ext.get(PREVIEW_TAG):
+                if g.ext.get("node_id") in sel_set:
+                    matching.append(g)
+
+        for g in matching:
+            sc.selection.add(g)
+
+        # If a selected node is NOT in active preview (e.g. its output was wired downstream),
+        # extract its cached geometry directly and create an ephemeral selected preview group!
+        existing_nids = {g.ext.get("node_id") for g in matching}
+        missing_nids = sel_set - existing_nids
+        for nid in missing_nids:
+            node = self.engine.nodes.get(nid)
+            if node and getattr(node, "is_enabled", True) and not node.error_message:
+                for out_spec in node.outputs:
+                    val = node.cached_outputs.get(out_spec.id)
+                    if val is None:
+                        continue
+                    m_list = []
+                    if isinstance(val, MeshData):
+                        m_list.append(val)
+                    elif isinstance(val, CurveData):
+                        m_list.append(val.to_wire_mesh(name=f"{node.title}_Curve"))
+                    elif isinstance(val, list):
+                        for item in val:
+                            if isinstance(item, MeshData):
+                                m_list.append(item)
+                            elif isinstance(item, CurveData):
+                                m_list.append(item.to_wire_mesh(name=f"{node.title}_Curve"))
+                    for mdata in m_list:
+                        sel_mdata = mdata.copy()
+                        sel_mdata.source_node_id = nid
+                        sel_mdata.name = f"[Selected] {node.title}"
+                        sel_grp = _make_ingetrazo_group(sel_mdata, {}, is_preview=True, scene=sc)
+                        sc.groups.append(sel_grp)
+                        sc.selection.add(sel_grp)
+
+        self._bump_viewport()
 
     def clear_preview(self, refresh: bool = True) -> None:
         """Removes transient live-preview groups from `scene.groups`."""
@@ -529,6 +689,7 @@ class NodeEditorDialog(QDialog):
             on_live_toggled=self.bridge.set_live_sync,
             get_bridge_error=lambda: self.bridge.last_error,
             get_app=lambda: self.app,
+            on_node_selection_changed=self.bridge.on_nodes_selected,
             parent=self,
         )
 
@@ -686,6 +847,7 @@ def setup(app: Any) -> None:
             get_bridge_error=lambda: bridge.last_error,
             on_load_selection=_handle_load_from_selection,
             get_app=lambda: app,
+            on_node_selection_changed=bridge.on_nodes_selected,
         )
 
         # Register as a dock tab in the side tray (beside Properties, BIM, Solid Inspector)
