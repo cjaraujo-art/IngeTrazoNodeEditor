@@ -658,8 +658,8 @@ class PlaneFromNormalNode(BaseNode):
 # ============================================================================
 @register_node
 class RectangleProfileNode(BaseNode):
-    type_id = "curve.rectangle"
-    description = "Generates a rectangular polyline with optional rounded fillet corners."
+    type_id = "curve.rectangle_profile"
+    description = "Generates a 2D rectangular profile polyline from origin and dimensions."
     title = "Rectangle Profile"
     category = "Curves"
     header_color = (165, 105, 45)

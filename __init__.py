@@ -599,7 +599,11 @@ class IngeTrazoSceneBridge:
                 target_scene.groups.append(grp)
                 baked_count += 1
 
-        history = getattr(self.app, "history", None) or getattr(sc, "history", None)
+        history = (
+            getattr(self.viewport, "history", None)
+            or getattr(self.app, "history", None)
+            or getattr(sc, "history", None)
+        )
         committed = False
 
         if history is not None:
@@ -610,7 +614,8 @@ class IngeTrazoSceneBridge:
                 if len(sig.parameters) <= 2:
                     cmd = SnapshotImport(_do_commit)
                     if hasattr(history, "execute"):
-                        history.execute(cmd, sc)
+                        # IngeTrazo's History.execute(cmd) takes only the command
+                        history.execute(cmd)
                         committed = True
                     elif hasattr(history, "push"):
                         _do_commit(sc)
@@ -624,8 +629,10 @@ class IngeTrazoSceneBridge:
                     if hasattr(history, "push"):
                         history.push(snap)
                     committed = True
-            except Exception:
-                committed = False
+            except Exception as exc:
+                import logging
+                logging.getLogger("ingetrazo.plugins").error(f"Bake history commit failed: {exc}", exc_info=True)
+                committed = baked_count > 0  # never re-bake after a partial commit
 
         if not committed:
             _do_commit(sc)

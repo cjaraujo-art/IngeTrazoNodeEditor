@@ -19,6 +19,9 @@ from nodes import discover_nodes
 from PySide6.QtWidgets import QApplication
 from ui_canvas import NodeItem
 
+# Discover all nodes at import time so unit tests run cleanly under both pytest and unittest
+discover_nodes(reload_modules=False)
+
 
 class TestCoreGeometry(unittest.TestCase):
     def test_vec3_operations(self):
@@ -1387,6 +1390,209 @@ class TestNewNodesAndUIEnhancements(unittest.TestCase):
         popup._accept_current()
         self.assertEqual(len(picked), 1)
         self.assertEqual(picked[0], "solid.extrude_face")
+
+
+
+
+class TestIssue4Fixes(unittest.TestCase):
+    """Test suite covering fixes for Issue #4 (Bake undo, Slab normals, Scene rect, Rectangle type_id)."""
+
+    def test_issue4_rectangle_nodes_coexistence(self):
+        self.assertIn("curve.rectangle", NODE_REGISTRY)
+        self.assertIn("curve.rectangle_profile", NODE_REGISTRY)
+        
+        rect_curve_cls = NODE_REGISTRY["curve.rectangle"]
+        rect_profile_cls = NODE_REGISTRY["curve.rectangle_profile"]
+        self.assertNotEqual(rect_curve_cls, rect_profile_cls)
+        
+        # Rectangle Curve outputs both curve and face
+        rc = rect_curve_cls()
+        out_ids = [o.id for o in rc.outputs]
+        self.assertIn("curve", out_ids)
+        self.assertIn("face", out_ids)
+        res_rc = rc.compute(width=6.0, length=4.0, fillet=0.0, center=Vec3(0, 0, 0))
+        self.assertIn("curve", res_rc)
+        self.assertIn("face", res_rc)
+        self.assertEqual(len(res_rc["curve"].points), 4)
+
+        # Rectangle Profile outputs curve
+        rp = rect_profile_cls()
+        out_ids_p = [o.id for o in rp.outputs]
+        self.assertIn("curve", out_ids_p)
+        res_rp = rp.compute(origin=Vec3(1, 2, 3), width=5.0, length=7.0)
+        self.assertIn("curve", res_rp)
+        self.assertEqual(res_rp["curve"].points[0], Vec3(1, 2, 3))
+
+        # Test engine backward compatibility: old graph with type_id "curve.rectangle" + origin
+        engine = GraphEngine()
+        legacy_data = {
+            "nodes": [
+                {
+                    "id": "legacy_rect_1",
+                    "type_id": "curve.rectangle",
+                    "params": {"origin": [0.0, 0.0, 0.0], "width": 4.0, "length": 3.0},
+                    "pos": [10.0, 20.0]
+                }
+            ],
+            "wires": []
+        }
+        engine.load_dict(legacy_data)
+        loaded_node = engine.get_node("legacy_rect_1")
+        self.assertIsNotNone(loaded_node)
+        self.assertEqual(loaded_node.type_id, "curve.rectangle_profile")
+
+    def test_issue2_slab_outward_normals_and_cw_normalization(self):
+        slab_cls = NODE_REGISTRY["arch.slab"]
+        slab = slab_cls()
+
+        # 1. CCW points centered at origin (10m x 10m, thickness 0.5m)
+        ccw_pts = [Vec3(-5, -5, 0), Vec3(5, -5, 0), Vec3(5, 5, 0), Vec3(-5, 5, 0)]
+        res_ccw = slab.compute(boundary=ccw_pts, thickness=0.5, elevation=0.0, overhang=0.0)
+        mesh_ccw: MeshData = res_ccw["slab_mesh"]
+
+        def _calc_face_normal(verts, face_indices):
+            v0 = Vec3(*verts[face_indices[0]])
+            v1 = Vec3(*verts[face_indices[1]])
+            v2 = Vec3(*verts[face_indices[2]])
+            return (v1 - v0).cross(v2 - v0).normalized()
+
+        # Top face (index 0) should face +Z (0, 0, 1)
+        top_norm = _calc_face_normal(mesh_ccw.vertices, mesh_ccw.faces[0])
+        self.assertAlmostEqual(top_norm.z, 1.0, places=3)
+
+        # Bottom face (index 1) should face -Z (0, 0, -1)
+        bot_norm = _calc_face_normal(mesh_ccw.vertices, mesh_ccw.faces[1])
+        self.assertAlmostEqual(bot_norm.z, -1.0, places=3)
+
+        # Side faces: indices 2 to 5.
+        # Side quad 0: from (-5,-5) to (5,-5) -> should face -Y (0, -1, 0)
+        side0_norm = _calc_face_normal(mesh_ccw.vertices, mesh_ccw.faces[2])
+        self.assertAlmostEqual(side0_norm.y, -1.0, places=3)
+        self.assertAlmostEqual(side0_norm.z, 0.0, places=3)
+
+        # Side quad 1: from (5,-5) to (5,5) -> should face +X (1, 0, 0)
+        side1_norm = _calc_face_normal(mesh_ccw.vertices, mesh_ccw.faces[3])
+        self.assertAlmostEqual(side1_norm.x, 1.0, places=3)
+        self.assertAlmostEqual(side1_norm.z, 0.0, places=3)
+
+        # 2. CW points: must automatically reverse and yield identical outward normals
+        cw_pts = [Vec3(-5, -5, 0), Vec3(-5, 5, 0), Vec3(5, 5, 0), Vec3(5, -5, 0)]
+        res_cw = slab.compute(boundary=cw_pts, thickness=0.5, elevation=0.0, overhang=0.0)
+        mesh_cw: MeshData = res_cw["slab_mesh"]
+        top_cw = _calc_face_normal(mesh_cw.vertices, mesh_cw.faces[0])
+        self.assertAlmostEqual(top_cw.z, 1.0, places=3)
+        bot_cw = _calc_face_normal(mesh_cw.vertices, mesh_cw.faces[1])
+        self.assertAlmostEqual(bot_cw.z, -1.0, places=3)
+
+    def test_issue3_canvas_grow_scene_rect(self):
+        from ui_canvas import NodeCanvasScene, NodeCanvasView, NodeItem
+        app = QApplication.instance() or QApplication([])
+        engine = GraphEngine()
+        scene = NodeCanvasScene(engine, lambda: None)
+        view = NodeCanvasView(scene)
+
+        # Initial scene rect is +-5000
+        init_rect = scene.sceneRect()
+        self.assertEqual(init_rect.width(), 10000)
+        self.assertEqual(init_rect.height(), 10000)
+
+        # Add a node item far below at y = 7000
+        node = engine.add_node("curve.circle", pos=(0.0, 7000.0))
+        item = NodeItem(node, lambda *a: None)
+        scene.addItem(item)
+        scene.node_items[node.id] = item
+        item.setPos(0.0, 7000.0)
+
+        # Trigger _grow_scene_rect()
+        view._grow_scene_rect()
+        new_rect = scene.sceneRect()
+        self.assertGreaterEqual(new_rect.bottom(), 8500.0)
+
+    def test_issue1_bake_history_viewport_lookup(self):
+        import sys, types
+        from __init__ import IngeTrazoSceneBridge
+
+        # Setup mock core modules for headless test environment
+        core_mod = types.ModuleType("core")
+        core_mesh = types.ModuleType("core.mesh")
+        core_scene = types.ModuleType("core.scene")
+        core_history = types.ModuleType("core.history")
+
+        class MockMesh:
+            def __init__(self):
+                self.faces = []
+                self.edges = []
+            def add_face(self, qvecs):
+                return type("F", (), {"attrs": {}})()
+            def add_edge(self, p1, p2):
+                pass
+
+        class MockGroup:
+            def __init__(self, *args, **kwargs):
+                self.name = kwargs.get("name", "Group")
+                self.mesh = kwargs.get("mesh", None)
+                self.ext = {}
+
+        executed_cmds = []
+
+        class MockSnapshotImport:
+            def __init__(self, fn):
+                self.fn = fn
+            def __call__(self, s):
+                self.fn(s)
+
+        core_mesh.Mesh = MockMesh
+        core_scene.Group = MockGroup
+        core_history.SnapshotImport = MockSnapshotImport
+        core_mod.mesh = core_mesh
+        core_mod.scene = core_scene
+        core_mod.history = core_history
+
+        old_modules = {k: sys.modules.get(k) for k in ("core", "core.mesh", "core.scene", "core.history")}
+        sys.modules["core"] = core_mod
+        sys.modules["core.mesh"] = core_mesh
+        sys.modules["core.scene"] = core_scene
+        sys.modules["core.history"] = core_history
+
+        try:
+            class MockHistory:
+                def execute(self, cmd):
+                    executed_cmds.append(cmd)
+                    # Simulate history running cmd
+                    cmd(mock_app.scene)
+
+            class MockViewport:
+                def __init__(self):
+                    self.history = MockHistory()
+
+            class MockScene:
+                def __init__(self):
+                    self.groups = []
+                    self.materials = {}
+
+            class MockApp:
+                def __init__(self):
+                    self.viewport = MockViewport()
+                    self.scene = MockScene()
+
+            mock_app = MockApp()
+            engine = GraphEngine()
+            bridge = IngeTrazoSceneBridge(mock_app, engine)
+
+            # Add a node that produces mesh output
+            node = engine.add_node("solid.box")
+            engine.evaluate()
+
+            baked = bridge.bake_to_scene()
+            self.assertGreater(baked, 0)
+            self.assertEqual(len(executed_cmds), 1)
+            self.assertEqual(len(mock_app.scene.groups), 1)
+        finally:
+            for k, mod in old_modules.items():
+                if mod is None:
+                    sys.modules.pop(k, None)
+                else:
+                    sys.modules[k] = mod
 
 
 if __name__ == "__main__":

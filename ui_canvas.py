@@ -1665,13 +1665,28 @@ class NodeCanvasView(QGraphicsView):
         self._cut_points: List[QPointF] = []
         self._cut_item: Optional[QGraphicsPathItem] = None
 
+    def _grow_scene_rect(self) -> None:
+        """The scene starts at +-5000; grow it so large graphs stay reachable by panning."""
+        sc = self.scene()
+        if sc is None:
+            return
+        items = sc.itemsBoundingRect()
+        if items.isEmpty():
+            return
+        need = items.adjusted(-1500, -1500, 1500, 1500)
+        cur = sc.sceneRect()
+        if not cur.contains(need):
+            sc.setSceneRect(cur.united(need))
+
     def wheelEvent(self, event: QWheelEvent) -> None:
+        self._grow_scene_rect()
         factor = 1.15 if event.angleDelta().y() > 0 else 1.0 / 1.15
         curr_scale = self.transform().m11()
         if (0.2 <= curr_scale <= 3.0) or (curr_scale < 0.2 and factor > 1) or (curr_scale > 3.0 and factor < 1):
             self.scale(factor, factor)
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
+        self._grow_scene_rect()
         ctrl = bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
         if event.button() == Qt.MouseButton.LeftButton and ctrl:
             item = self.itemAt(event.pos())
@@ -2056,6 +2071,7 @@ class NodeCanvasView(QGraphicsView):
         self.canvas_scene.trigger_eval()
 
     def fit_view(self) -> None:
+        self._grow_scene_rect()
         rect = self.canvas_scene.itemsBoundingRect()
         if not rect.isEmpty():
             self.fitInView(rect.adjusted(-60, -60, 60, 60), Qt.AspectRatioMode.KeepAspectRatio)

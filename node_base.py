@@ -48,6 +48,11 @@ def register_node(cls: Type[BaseNode]) -> Type[BaseNode]:
     """
     if not getattr(cls, "type_id", ""):
         raise ValueError(f"Node class {cls.__name__} must define a unique 'type_id' string.")
+    if cls.type_id in NODE_REGISTRY and NODE_REGISTRY[cls.type_id] is not cls:
+        import logging
+        logging.getLogger("ingetrazo.plugins").warning(
+            f"Duplicate type_id '{cls.type_id}' registered by {cls.__name__}, overwriting {NODE_REGISTRY[cls.type_id].__name__}"
+        )
     NODE_REGISTRY[cls.type_id] = cls
 
     # Cross-module synchronization across sys.modules

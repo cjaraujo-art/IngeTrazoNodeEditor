@@ -295,6 +295,16 @@ class SlabNode(BaseNode):
         z_top = float(elevation)
         z_bot = z_top - th
 
+        # Boundary must be counter-clockwise (seen from +Z) so the top cap faces up
+        # and the side quads face outward.
+        if len(pts) >= 3:
+            area2 = sum(
+                pts[i].x * pts[(i + 1) % len(pts)].y - pts[(i + 1) % len(pts)].x * pts[i].y
+                for i in range(len(pts))
+            )
+            if area2 < 0:
+                pts = list(reversed(pts))
+
         if abs(overhang) > 1e-4:
             pts = _offset_points(pts, float(overhang))
 
@@ -312,11 +322,11 @@ class SlabNode(BaseNode):
         faces.append(list(range(n)))
         # Bottom cap (-Z, reversed CW)
         faces.append(list(reversed(range(n, 2 * n))))
-        # Side quads
+        # Side quads (top to bottom: [i, n + i, n + nxt, nxt] ensures normals point outward)
         edges: List[Tuple[int, int]] = []
         for i in range(n):
             nxt = (i + 1) % n
-            faces.append([i, nxt, n + nxt, n + i])
+            faces.append([i, n + i, n + nxt, nxt])
             edges.append((i, nxt))
             edges.append((n + i, n + nxt))
             edges.append((i, n + i))

@@ -402,6 +402,9 @@ class GraphEngine:
 
         for nd in data.get("nodes", []):
             type_id = nd.get("type_id", "")
+            # Legacy migration: curve.rectangle with 'origin' was RectangleProfileNode
+            if type_id == "curve.rectangle" and "origin" in nd.get("params", {}) and "fillet" not in nd.get("params", {}):
+                type_id = "curve.rectangle_profile"
             if type_id not in NODE_REGISTRY:
                 continue
             old_id = nd.get("id")
@@ -466,6 +469,9 @@ class GraphEngine:
         self.wires.clear()
         for nd in data.get("nodes", []):
             type_id = nd.get("type_id", "")
+            # Legacy migration: curve.rectangle with 'origin' was RectangleProfileNode
+            if type_id == "curve.rectangle" and "origin" in nd.get("params", {}) and "fillet" not in nd.get("params", {}):
+                type_id = "curve.rectangle_profile"
             if type_id not in NODE_REGISTRY:
                 continue
             pos_list = nd.get("pos", [0.0, 0.0])

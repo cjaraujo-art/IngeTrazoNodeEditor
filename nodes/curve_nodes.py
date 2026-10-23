@@ -83,6 +83,7 @@ class RectangleCurveNode(BaseNode):
         InputSpec("center", "Center", SocketType.VEC3, default=Vec3(0, 0, 0), hide_widget=True),
     ]
     outputs = [
+        OutputSpec("curve", "Curve", SocketType.CURVE),
         OutputSpec("face", "Face", SocketType.MESH),
     ]
 
@@ -117,6 +118,7 @@ class RectangleCurveNode(BaseNode):
 
         curve = CurveData(points=pts, closed=True)
         return {
+            "curve": curve,
             "face": curve.to_mesh_face("RectangleFace"),
         }
 
