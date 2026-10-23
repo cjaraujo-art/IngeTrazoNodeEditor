@@ -16,6 +16,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QColorDialog, QComboBox, QDialog, QDoubleSpinBox,
+    QInputDialog, QMessageBox,
     QFileDialog, QFrame, QGraphicsItem, QGraphicsPathItem, QGraphicsProxyWidget,
     QGraphicsScene, QGraphicsView, QGridLayout, QGroupBox, QHBoxLayout, QLabel,
     QLineEdit, QListWidget, QListWidgetItem, QMenu, QPlainTextEdit, QPushButton,
@@ -50,35 +51,132 @@ _ICON_CACHE: Dict[Tuple[str, bool], QIcon] = {}
 
 
 def get_node_icon(type_id: str, is_dark: bool = True) -> QIcon:
-    """Returns a QIcon for `type_id` matching dark or light theme, with clean fallback."""
+    """
+    Returns a QIcon for `type_id` matching dark or light theme.
+    Supports custom node pack icons from addon `icons/` folders, explicit `icon` attributes,
+    custom `icon_tag` text/emojis, or smart abbreviation fallback.
+    """
     key = (type_id, is_dark)
     if key in _ICON_CACHE:
         return _ICON_CACHE[key]
 
     sub_dir = "dark" if is_dark else "light"
     base_dir = os.path.dirname(os.path.abspath(__file__))
-    icon_path = os.path.join(base_dir, "icons", sub_dir, f"{type_id}.png")
+    node_cls = NODE_REGISTRY.get(type_id)
+    icon_file_path: Optional[str] = None
 
-    if os.path.isfile(icon_path):
-        icon = QIcon(icon_path)
+    # 1. Custom node addon icon resolution
+    if node_cls is not None:
+        raw_icon = getattr(node_cls, "icon", None)
+        addon_dir = getattr(node_cls, "_addon_dir", None)
+        addon_icons_dir = getattr(node_cls, "_addon_icons_dir", None)
+
+        if raw_icon and isinstance(raw_icon, str):
+            if os.path.isabs(raw_icon) and os.path.isfile(raw_icon):
+                icon_file_path = raw_icon
+            else:
+                candidates = []
+                if addon_icons_dir:
+                    candidates.extend([
+                        os.path.join(addon_icons_dir, sub_dir, raw_icon),
+                        os.path.join(addon_icons_dir, raw_icon),
+                    ])
+                if addon_dir:
+                    candidates.extend([
+                        os.path.join(addon_dir, "icons", sub_dir, raw_icon),
+                        os.path.join(addon_dir, "icons", raw_icon),
+                        os.path.join(addon_dir, raw_icon),
+                    ])
+                candidates.extend([
+                    os.path.join(base_dir, "icons", sub_dir, raw_icon),
+                    os.path.join(base_dir, "icons", raw_icon),
+                ])
+                for cand in candidates:
+                    if os.path.isfile(cand):
+                        icon_file_path = cand
+                        break
+
+        # Check for auto-matched filename in addon icons directory
+        if not icon_file_path and (addon_icons_dir or addon_dir):
+            search_folders = []
+            if addon_icons_dir:
+                search_folders.extend([os.path.join(addon_icons_dir, sub_dir), addon_icons_dir])
+            if addon_dir:
+                search_folders.extend([os.path.join(addon_dir, "icons", sub_dir), os.path.join(addon_dir, "icons")])
+
+            stem = type_id.split(".")[-1]
+            names_to_try = [
+                f"{type_id}.png", f"{stem}.png", f"{type_id}.svg", f"{stem}.svg",
+                f"{node_cls.__name__}.png", f"{node_cls.__name__}.svg"
+            ]
+            for s_folder in search_folders:
+                for n in names_to_try:
+                    c_path = os.path.join(s_folder, n)
+                    if os.path.isfile(c_path):
+                        icon_file_path = c_path
+                        break
+                if icon_file_path:
+                    break
+
+    # 2. Check built-in icons
+    if not icon_file_path:
+        builtin_path = os.path.join(base_dir, "icons", sub_dir, f"{type_id}.png")
+        if os.path.isfile(builtin_path):
+            icon_file_path = builtin_path
+
+    # If image file found, load and cache
+    if icon_file_path and os.path.isfile(icon_file_path):
+        icon = QIcon(icon_file_path)
+        _ICON_CACHE[key] = icon
+        return icon
+
+    # 3. Dynamic badge generator (handles icon_tag, emojis, or 2-letter abbreviation)
+    pm = QPixmap(32, 32)
+    pm.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    p.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+
+    h_col = getattr(node_cls, "header_color", None) if node_cls else None
+    if h_col and len(h_col) == 3:
+        theme_tint = QColor(h_col[0], h_col[1], h_col[2])
     else:
-        pm = QPixmap(32, 32)
-        pm.fill(Qt.GlobalColor.transparent)
-        p = QPainter(pm)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        bg = QColor(44, 49, 58) if is_dark else QColor(220, 224, 230)
-        fg = QColor(220, 224, 230) if is_dark else QColor(33, 37, 43)
-        p.setBrush(QBrush(bg))
-        p.setPen(QPen(fg, 1.0))
-        p.drawRoundedRect(1, 1, 30, 30, 6, 6)
-        p.setPen(QPen(fg))
-        font = QFont("Segoe UI", 8, QFont.Weight.Bold)
-        p.setFont(font)
-        abbr = (type_id.split(".")[-1][:2]).upper()
-        p.drawText(QRectF(0, 0, 32, 32), Qt.AlignmentFlag.AlignCenter, abbr)
-        p.end()
-        icon = QIcon(pm)
+        theme_tint = QColor(97, 175, 239)
 
+    if is_dark:
+        bg = QColor(36, 40, 48)
+        border_col = theme_tint.lighter(115)
+        text_col = theme_tint.lighter(130)
+    else:
+        bg = QColor(240, 242, 246)
+        border_col = theme_tint.darker(115)
+        text_col = theme_tint.darker(130)
+
+    p.setBrush(QBrush(bg))
+    p.setPen(QPen(border_col, 1.2))
+    p.drawRoundedRect(1, 1, 30, 30, 6, 6)
+
+    tag = getattr(node_cls, "icon_tag", None) if node_cls else None
+    if not tag:
+        tag = (type_id.split(".")[-1][:2]).upper()
+    else:
+        tag = str(tag).strip()
+
+    is_emoji = any(ord(ch) > 0x2000 for ch in tag)
+    if is_emoji:
+        font = QFont("Segoe UI Emoji", 13)
+        p.setFont(font)
+        p.setPen(QPen(QColor(255, 255, 255)))
+    else:
+        font_size = 9 if len(tag) <= 2 else (8 if len(tag) <= 3 else 7)
+        font = QFont("Segoe UI", font_size, QFont.Weight.Bold)
+        p.setFont(font)
+        p.setPen(QPen(text_col))
+
+    p.drawText(QRectF(0, 0, 32, 32), Qt.AlignmentFlag.AlignCenter, tag)
+    p.end()
+
+    icon = QIcon(pm)
     _ICON_CACHE[key] = icon
     return icon
 
@@ -1958,6 +2056,12 @@ class NodeCanvasView(QGraphicsView):
             act_reload = menu.addAction(tr("🔄 Reload Nodes Catalog"))
             act_reload.triggered.connect(self.parent_editor._hot_reload_nodes)
 
+            act_open_custom = menu.addAction(tr("📁 Open Custom Nodes Folder"))
+            act_open_custom.triggered.connect(self.parent_editor._open_custom_nodes_folder)
+
+            act_new_custom = menu.addAction(tr("➕ Create New Custom Node..."))
+            act_new_custom.triggered.connect(self.parent_editor._create_custom_node_dialog)
+
         act_fit = menu.addAction(tr("🔎 Fit All in View (F)"))
         act_fit.triggered.connect(self.fit_view)
 
@@ -3306,6 +3410,269 @@ class NodeRibbonBar(QWidget):
 
 
 # ============================================================================
+# MINIMAP OVERLAY (ComfyUI-style navigation overview)
+# ============================================================================
+class CanvasMinimap(QWidget):
+    """Self-contained semi-transparent minimap overlay for navigating the canvas.
+
+    Renders scaled-down node rectangles and wires, draws a viewport rectangle
+    showing the currently visible area, and supports click-to-navigate and
+    drag-to-pan.  It is placed as a child overlay widget of the NodeCanvasView
+    and does **not** modify the Frozen Core canvas code.
+    """
+
+    _MINIMAP_W = 210
+    _MINIMAP_H = 145
+    _MARGIN = 12           # inset from canvas corner
+    _BG_COLOR = QColor(18, 22, 28, 215)
+    _BORDER_COLOR = QColor(60, 68, 82, 200)
+    _VIEWPORT_COLOR = QColor(97, 175, 239, 45)    # #61afef translucent fill
+    _VIEWPORT_BORDER = QColor(97, 175, 239, 230)  # #61afef bright border
+    _WIRE_COLOR = QColor(90, 105, 125, 140)
+    _NODE_BODY = QColor(40, 44, 52, 220)
+    _NODE_BORDER = QColor(58, 64, 76, 160)
+
+    def __init__(self, canvas_view: "NodeCanvasView", parent: Optional[QWidget] = None) -> None:
+        target_parent = parent or canvas_view.viewport()
+        super().__init__(target_parent)
+        self.canvas_view = canvas_view
+        self._dragging_viewport = False
+        self._drag_scene_offset = QPointF(0, 0)
+        self._scene_rect = QRectF()
+        self._refresh_timer = QTimer(self)
+        self._refresh_timer.setInterval(200)  # 5 fps idle polling
+        self._refresh_timer.timeout.connect(self._schedule_repaint)
+        self._refresh_timer.start()
+        self.setFixedSize(self._MINIMAP_W, self._MINIMAP_H)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setToolTip(tr("Minimap – click or drag to navigate"))
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
+
+        # Track view / viewport resize to remain anchored
+        canvas_view.viewport().installEventFilter(self)
+        canvas_view.installEventFilter(self)
+
+        # Live viewport updates when panning or zooming canvas
+        canvas_view.horizontalScrollBar().valueChanged.connect(lambda _: self._schedule_repaint())
+        canvas_view.verticalScrollBar().valueChanged.connect(lambda _: self._schedule_repaint())
+
+        self._reposition()
+        self.show()
+
+    # ── Geometry helpers ────────────────────────────────────────────────
+    def eventFilter(self, obj: Any, event: Any) -> bool:
+        """Reposition when the parent view or viewport is resized or shown."""
+        if event.type() in (QEvent.Type.Resize, QEvent.Type.Show):
+            self._reposition()
+            self._schedule_repaint()
+        return False
+
+    def _reposition(self) -> None:
+        """Anchor the minimap to the bottom-right corner of the parent."""
+        p = self.parent()
+        if p is None:
+            return
+        pw, ph = p.width(), p.height()
+        if pw <= 1 or ph <= 1:
+            return
+        x = pw - self._MINIMAP_W - self._MARGIN
+        y = ph - self._MINIMAP_H - self._MARGIN
+        self.move(max(0, x), max(0, y))
+        self.raise_()
+
+    def _compute_scene_rect(self) -> QRectF:
+        """Return the bounding rect of all scene items united with the visible viewport."""
+        sc = self.canvas_view.scene()
+        vp = self.canvas_view.viewport()
+        view_tl = self.canvas_view.mapToScene(QPoint(0, 0))
+        view_br = self.canvas_view.mapToScene(QPoint(vp.width(), vp.height()))
+        visible_rect = QRectF(view_tl, view_br).normalized()
+
+        if sc is None:
+            return visible_rect.adjusted(-200, -200, 200, 200)
+        items = sc.itemsBoundingRect()
+        if items.isEmpty():
+            return visible_rect.adjusted(-200, -200, 200, 200)
+
+        # Combine items with visible viewport so both nodes and camera are always in view
+        combined = items.united(visible_rect)
+        mx = max(200.0, combined.width() * 0.1)
+        my = max(200.0, combined.height() * 0.1)
+        return combined.adjusted(-mx, -my, mx, my)
+
+    def _scene_to_minimap(self, scene_rect: QRectF, pt: QPointF) -> QPointF:
+        """Map a scene-space point into minimap widget coordinates."""
+        if scene_rect.width() < 1 or scene_rect.height() < 1:
+            return QPointF(0, 0)
+        pad = 8.0
+        sx = (self._MINIMAP_W - pad * 2) / scene_rect.width()
+        sy = (self._MINIMAP_H - pad * 2) / scene_rect.height()
+        s = min(sx, sy)
+        cw = scene_rect.width() * s
+        ch = scene_rect.height() * s
+        ox = (self._MINIMAP_W - cw) / 2.0
+        oy = (self._MINIMAP_H - ch) / 2.0
+        x = ox + (pt.x() - scene_rect.left()) * s
+        y = oy + (pt.y() - scene_rect.top()) * s
+        return QPointF(x, y)
+
+    def _scene_rect_to_minimap(self, scene_rect: QRectF, r: QRectF) -> QRectF:
+        tl = self._scene_to_minimap(scene_rect, r.topLeft())
+        br = self._scene_to_minimap(scene_rect, r.bottomRight())
+        return QRectF(tl, br).normalized()
+
+    def _minimap_to_scene(self, scene_rect: QRectF, pt: QPointF) -> QPointF:
+        """Map a minimap widget coordinate back into scene space."""
+        if scene_rect.width() < 1 or scene_rect.height() < 1:
+            return QPointF(0, 0)
+        pad = 8.0
+        sx = (self._MINIMAP_W - pad * 2) / scene_rect.width()
+        sy = (self._MINIMAP_H - pad * 2) / scene_rect.height()
+        s = min(sx, sy)
+        if s <= 0:
+            return QPointF(0, 0)
+        cw = scene_rect.width() * s
+        ch = scene_rect.height() * s
+        ox = (self._MINIMAP_W - cw) / 2.0
+        oy = (self._MINIMAP_H - ch) / 2.0
+        scene_x = scene_rect.left() + (pt.x() - ox) / s
+        scene_y = scene_rect.top() + (pt.y() - oy) / s
+        return QPointF(scene_x, scene_y)
+
+    # ── Scheduled repaint ───────────────────────────────────────────────
+    def _schedule_repaint(self) -> None:
+        self._scene_rect = self._compute_scene_rect()
+        self.update()
+
+    # ── Painting ────────────────────────────────────────────────────────
+    def paintEvent(self, event: Any) -> None:  # noqa: N802
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        # Background container
+        painter.setPen(QPen(self._BORDER_COLOR, 1.2))
+        painter.setBrush(QBrush(self._BG_COLOR))
+        painter.drawRoundedRect(0, 0, self.width() - 1, self.height() - 1, 6, 6)
+
+        # Small watermark label in top-left corner
+        painter.setFont(QFont("Segoe UI", 7, QFont.Weight.Bold))
+        painter.setPen(QColor(120, 130, 150, 160))
+        painter.drawText(8, 14, "MAP")
+
+        sr = self._scene_rect
+        sc = self.canvas_view.scene()
+        if sc is None:
+            painter.end()
+            return
+
+        # Draw wires
+        wire_pen = QPen(self._WIRE_COLOR, 1.0)
+        painter.setPen(wire_pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        for wi in getattr(sc, "wire_items", []):
+            if wi.src_sock and wi.dst_sock:
+                p1 = self._scene_to_minimap(sr, wi.src_sock.scenePos())
+                p2 = self._scene_to_minimap(sr, wi.dst_sock.scenePos())
+                painter.drawLine(p1, p2)
+
+        # Draw node rectangles
+        for node_item in getattr(sc, "node_items", {}).values():
+            try:
+                pos = node_item.pos()
+                w = getattr(node_item, "WIDTH", 228.0)
+                h = getattr(node_item, "height", 60.0)
+                r = self._scene_rect_to_minimap(sr, QRectF(pos.x(), pos.y(), w, h))
+
+                # Node body
+                hr, hg, hb = node_item.node.header_color
+                header_col = QColor(hr, hg, hb, 210)
+
+                # Selected?
+                if node_item.isSelected():
+                    painter.setPen(QPen(QColor(246, 185, 59, 220), 1.2))
+                else:
+                    painter.setPen(QPen(self._NODE_BORDER, 0.7))
+
+                painter.setBrush(QBrush(self._NODE_BODY))
+                painter.drawRoundedRect(r, 2, 2)
+
+                # Header stripe
+                header_r = QRectF(r.x(), r.y(), r.width(), max(2.0, r.height() * 0.32))
+                painter.setBrush(QBrush(header_col))
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.drawRoundedRect(header_r, 2, 2)
+            except (RuntimeError, AttributeError):
+                continue
+
+        # Draw viewport rectangle
+        view_tl = self.canvas_view.mapToScene(QPoint(0, 0))
+        vp = self.canvas_view.viewport()
+        view_br = self.canvas_view.mapToScene(QPoint(vp.width(), vp.height()))
+        vp_rect = self._scene_rect_to_minimap(sr, QRectF(view_tl, view_br).normalized())
+
+        painter.setBrush(QBrush(self._VIEWPORT_COLOR))
+        painter.setPen(QPen(self._VIEWPORT_BORDER, 1.4))
+        painter.drawRoundedRect(vp_rect, 2, 2)
+
+        painter.end()
+
+    # ── Mouse interaction (click-to-navigate, drag viewport) ────────────
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        if event.button() != Qt.MouseButton.LeftButton:
+            return
+        sr = self._scene_rect
+        view_tl = self.canvas_view.mapToScene(QPoint(0, 0))
+        vp = self.canvas_view.viewport()
+        view_br = self.canvas_view.mapToScene(QPoint(vp.width(), vp.height()))
+        vp_rect = self._scene_rect_to_minimap(sr, QRectF(view_tl, view_br).normalized())
+
+        click = event.position()
+        if vp_rect.contains(click):
+            self._dragging_viewport = True
+            click_scene = self._minimap_to_scene(sr, click)
+            vp_center_scene = self.canvas_view.mapToScene(QPoint(vp.width() // 2, vp.height() // 2))
+            self._drag_scene_offset = click_scene - vp_center_scene
+        else:
+            self._dragging_viewport = True
+            self._drag_scene_offset = QPointF(0, 0)
+            target_scene = self._minimap_to_scene(sr, click)
+            if hasattr(self.canvas_view, "_grow_scene_rect"):
+                self.canvas_view._grow_scene_rect()
+            self.canvas_view.centerOn(target_scene)
+            self._schedule_repaint()
+        event.accept()
+
+    def mouseMoveEvent(self, event: QMouseEvent) -> None:
+        if self._dragging_viewport and (event.buttons() & Qt.MouseButton.LeftButton):
+            sr = self._scene_rect
+            click_scene = self._minimap_to_scene(sr, event.position())
+            target_scene = click_scene - self._drag_scene_offset
+            if hasattr(self.canvas_view, "_grow_scene_rect"):
+                self.canvas_view._grow_scene_rect()
+            self.canvas_view.centerOn(target_scene)
+            self._schedule_repaint()
+            event.accept()
+        else:
+            super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._dragging_viewport = False
+            event.accept()
+        else:
+            super().mouseReleaseEvent(event)
+
+    def wheelEvent(self, event: QWheelEvent) -> None:
+        # Forward zoom events to canvas view
+        self.canvas_view.wheelEvent(event)
+
+    # ── Resize follow ───────────────────────────────────────────────────
+    def resizeEvent(self, event: Any) -> None:
+        super().resizeEvent(event)
+        self._reposition()
+
+
+# ============================================================================
 # MAIN NODE EDITOR WIDGET
 # ============================================================================
 class NodeEditorWidget(QWidget):
@@ -3424,6 +3791,9 @@ class NodeEditorWidget(QWidget):
         self.btn_add.setToolTip(tr("Add Node (Space or Tab)"))
         self.btn_reload = QPushButton("🔄")
         self.btn_reload.setToolTip(tr("Reload Nodes catalog"))
+        self.btn_custom = QPushButton(tr("🧩 Custom"))
+        self.btn_custom.setToolTip(tr("Custom Nodes: Open folder or create new node from template"))
+        self.btn_custom.setStyleSheet("background: #2c313a; color: #61afef; border: 1px solid #3e4451; border-radius: 4px; padding: 3px 8px; font-size: 11px; font-weight: 500;")
         self.chk_live = QCheckBox(tr("🔴 Live"))
         self.chk_live.setToolTip(tr("Live Viewport Sync (60 FPS)"))
         self.chk_live.setStyleSheet("color: #e5c07b; font-size: 11px;")
@@ -3449,6 +3819,30 @@ class NodeEditorWidget(QWidget):
         self.btn_fit.setToolTip(tr("Fit all nodes in view (F)"))
         self.btn_fit.setStyleSheet("background: #2c313a; color: #88c0d0; border-radius: 4px; padding: 3px 7px;")
 
+        self.btn_minimap = QPushButton(tr("🗺️ Map"))
+        self.btn_minimap.setToolTip(tr("Toggle Minimap (navigation overview)"))
+        self.btn_minimap.setCheckable(True)
+        self.btn_minimap.setChecked(True)
+        self.btn_minimap.setStyleSheet("""
+            QPushButton {
+                background: #2c313a;
+                color: #88c0d0;
+                border: 1px solid #3e4451;
+                border-radius: 4px;
+                padding: 3px 7px;
+                font-size: 11px;
+            }
+            QPushButton:hover {
+                background: #3e4451;
+                color: #ffffff;
+            }
+            QPushButton:checked {
+                background: #3e4451;
+                color: #61afef;
+                border-color: #61afef;
+            }
+        """)
+
         meta = get_current_language_meta()
         self.btn_lang = QPushButton(f"{meta.get('flag', '🌐')} {meta.get('code', 'en').upper()} ▾")
         self.btn_lang.setToolTip(tr("Change Language"))
@@ -3473,11 +3867,12 @@ class NodeEditorWidget(QWidget):
         self.lbl_status.setStyleSheet("color: #98c379; font-size: 11px;")
 
         bar_layout.addWidget(self.btn_ribbon_toggle)
-        for b in (self.btn_add, self.btn_reload, self.btn_bake, self.btn_save, self.btn_load, self.btn_load_group):
+        for b in (self.btn_add, self.btn_reload, self.btn_custom, self.btn_bake, self.btn_save, self.btn_load, self.btn_load_group):
             bar_layout.addWidget(b)
         bar_layout.addWidget(self.chk_live)
         bar_layout.addWidget(self.btn_popout)
         bar_layout.addWidget(self.btn_fit)
+        bar_layout.addWidget(self.btn_minimap)
         bar_layout.addWidget(self.btn_lang)
         bar_layout.addStretch(1)
         bar_layout.addWidget(self.lbl_status)
@@ -3485,6 +3880,8 @@ class NodeEditorWidget(QWidget):
         self.scene = NodeCanvasScene(self.engine, self.schedule_eval, on_bake=self.on_bake, get_app=self.get_app)
         self.view = NodeCanvasView(self.scene)
         self.view.parent_editor = self
+
+        self.minimap = CanvasMinimap(self.view)
 
         self.inspector = NodeInspectorPanel(self)
         self.inspector.parent_editor = self
@@ -3528,6 +3925,7 @@ class NodeEditorWidget(QWidget):
         self.btn_ribbon_toggle.clicked.connect(self._toggle_ribbon)
         self.btn_add.clicked.connect(self._open_search_under_button)
         self.btn_reload.clicked.connect(self._hot_reload_nodes)
+        self.btn_custom.clicked.connect(self._open_custom_nodes_menu)
         self.chk_live.toggled.connect(self.on_live_toggled)
         self.btn_bake.clicked.connect(lambda: self.on_bake(None))
         self.btn_save.clicked.connect(self._save_graph)
@@ -3535,6 +3933,7 @@ class NodeEditorWidget(QWidget):
         self.btn_load_group.clicked.connect(self._handle_load_from_group)
         self.btn_popout.clicked.connect(self._toggle_popout)
         self.btn_fit.clicked.connect(self.view.fit_view)
+        self.btn_minimap.toggled.connect(self._toggle_minimap)
         self.btn_lang.clicked.connect(self._open_language_menu)
         register_language_listener(lambda code: self.retranslate_ui())
         self.scene.selectionChanged.connect(self._on_scene_selection_changed)
@@ -3544,6 +3943,13 @@ class NodeEditorWidget(QWidget):
         self.ribbon.setVisible(is_hidden)
         self.btn_ribbon_toggle.setText("▲" if is_hidden else "▼")
         self.btn_ribbon_toggle.setToolTip(tr("Hide Component Shelf") if is_hidden else tr("Show Component Shelf"))
+
+    def _toggle_minimap(self, visible: bool) -> None:
+        if hasattr(self, "minimap") and self.minimap:
+            self.minimap.setVisible(visible)
+            if visible:
+                self.minimap._reposition()
+                self.minimap._schedule_repaint()
 
     def _spawn_node_from_ribbon(self, type_id: str) -> None:
         view_rect = self.view.viewport().rect()
@@ -3625,6 +4031,7 @@ class NodeEditorWidget(QWidget):
             self.lbl_status.setText(f"⚡ {len(meshes)} solid(s) | {self.engine.last_eval_ms:.1f} ms")
 
     def _hot_reload_nodes(self) -> None:
+        _ICON_CACHE.clear()
         errs = discover_nodes(reload_modules=True)
         for n in self.engine.nodes.values():
             n.is_dirty = True
@@ -3671,6 +4078,121 @@ class NodeEditorWidget(QWidget):
         global_pt = self.btn_lang.mapToGlobal(btn_rect.bottomLeft())
         menu.exec(global_pt)
 
+    def _open_custom_nodes_menu(self) -> None:
+        """Displays popup menu for managing custom nodes folder and creating new nodes or addon packs."""
+        menu = QMenu(self)
+        menu.setStyleSheet("""
+            QMenu {
+                background-color: #21252b;
+                color: #abb2bf;
+                border: 1px solid #3e4451;
+                border-radius: 6px;
+                padding: 4px;
+                font-size: 11px;
+            }
+            QMenu::item {
+                padding: 6px 18px 6px 12px;
+                border-radius: 4px;
+            }
+            QMenu::item:selected {
+                background-color: #2c313a;
+                color: #ffffff;
+            }
+        """)
+        act_open = menu.addAction(tr("📁 Open Custom Nodes Folder"))
+        act_open.triggered.connect(self._open_custom_nodes_folder)
+
+        act_addon = menu.addAction(tr("📦 Create New Addon Pack (Folder + Icons)..."))
+        act_addon.triggered.connect(self._create_addon_pack_dialog)
+
+        act_new = menu.addAction(tr("➕ Create Single-File Custom Node..."))
+        act_new.triggered.connect(self._create_custom_node_dialog)
+
+        menu.addSeparator()
+
+        act_reload = menu.addAction(tr("🔄 Reload Nodes Catalog"))
+        act_reload.triggered.connect(self._hot_reload_nodes)
+
+        btn_rect = self.btn_custom.rect()
+        global_pt = self.btn_custom.mapToGlobal(btn_rect.bottomLeft())
+        menu.exec(global_pt)
+
+    def _create_addon_pack_dialog(self) -> None:
+        """Interactive dialog to scaffold a new Addon Pack folder with __init__.py and icons/."""
+        name, ok = QInputDialog.getText(
+            self,
+            tr("Create Addon Pack"),
+            tr("Enter Addon Name (e.g. Seg Nodes, Facade Tools, Custom Math):"),
+        )
+        if not ok or not name.strip():
+            return
+
+        try:
+            from nodes import create_addon_folder
+            addon_dir, init_py = create_addon_folder(name.strip())
+            self._hot_reload_nodes()
+
+            try:
+                if sys.platform == "win32":
+                    os.startfile(str(addon_dir))
+            except Exception:
+                pass
+
+            msg = tr("Created Addon Pack '{name}' at:\n{path}\n\n• '__init__.py' has your starter custom node.\n• 'icons/' folder is ready for your PNG/SVG icons.\n\nA new tab '{name}' has been added to the ribbon!").format(
+                name=name.strip(), path=str(addon_dir)
+            )
+            QMessageBox.information(self, tr("Addon Pack Created"), msg)
+        except Exception as ex:
+            err_msg = f"Failed to create addon pack:\n{ex}"
+            QMessageBox.warning(self, tr("Error"), err_msg)
+
+    def _open_custom_nodes_folder(self) -> None:
+        """Opens the user custom nodes directory in the system file explorer."""
+        from nodes import get_primary_custom_nodes_dir
+        folder = get_primary_custom_nodes_dir()
+        folder.mkdir(parents=True, exist_ok=True)
+        try:
+            if sys.platform == "win32":
+                os.startfile(str(folder))
+            elif sys.platform == "darwin":
+                import subprocess
+                subprocess.Popen(["open", str(folder)])
+            else:
+                import subprocess
+                subprocess.Popen(["xdg-open", str(folder)])
+            self.lbl_status.setText(f"📁 {folder.name}")
+        except Exception as ex:
+            self.lbl_status.setText(f"⚠️ {ex}")
+
+    def _create_custom_node_dialog(self) -> None:
+        """Interactive dialog to scaffold a new custom node .py file from the template."""
+        title, ok = QInputDialog.getText(
+            self,
+            tr("Create Custom Node"),
+            tr("Enter node name (e.g. My Wall Panel, Facade Fin, Wave Profile):"),
+        )
+        if not ok or not title.strip():
+            return
+
+        try:
+            from nodes import create_custom_node_file
+            py_path, cls_name = create_custom_node_file(title.strip())
+            self._hot_reload_nodes()
+
+            try:
+                if sys.platform == "win32":
+                    os.startfile(str(py_path))
+            except Exception:
+                pass
+
+            msg = tr("Created '{cls}' at:\n{path}\n\nIt is now loaded and available in the Add Node menu!").format(
+                cls=cls_name, path=str(py_path)
+            )
+            QMessageBox.information(self, tr("Custom Node Created"), msg)
+        except Exception as ex:
+            err_msg = f"Failed to create custom node:\n{ex}"
+            QMessageBox.warning(self, tr("Error"), err_msg)
+
     def _switch_language(self, code: str) -> None:
         set_language(code)
         self.retranslate_ui()
@@ -3685,6 +4207,8 @@ class NodeEditorWidget(QWidget):
         self.btn_add.setText(tr("➕ Add"))
         self.btn_add.setToolTip(tr("Add Node (Space or Tab)"))
         self.btn_reload.setToolTip(tr("Reload Nodes catalog"))
+        self.btn_custom.setText(tr("🧩 Custom"))
+        self.btn_custom.setToolTip(tr("Custom Nodes: Open folder or create new node from template"))
         self.chk_live.setText(tr("🔴 Live"))
         self.chk_live.setToolTip(tr("Live Viewport Sync (60 FPS)"))
         self.btn_bake.setText(tr("🥐 Bake"))
@@ -3695,6 +4219,11 @@ class NodeEditorWidget(QWidget):
         self.btn_load_group.setToolTip(tr("Load embedded graph from selected IngeTrazo Group"))
         self.btn_fit.setText(tr("🔎 Fit"))
         self.btn_fit.setToolTip(tr("Fit all nodes in view (F)"))
+        if hasattr(self, "btn_minimap"):
+            self.btn_minimap.setText(tr("🗺️ Map"))
+            self.btn_minimap.setToolTip(tr("Toggle Minimap (navigation overview)"))
+        if hasattr(self, "minimap") and self.minimap:
+            self.minimap.setToolTip(tr("Minimap – click or drag to navigate"))
 
         if hasattr(self, "_dock") and self._dock is not None:
             self._update_popout_button(self._dock.isFloating() if hasattr(self._dock, "isFloating") else False)

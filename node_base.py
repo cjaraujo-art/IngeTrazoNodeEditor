@@ -37,8 +37,14 @@ class OutputSpec:
     type: SocketType = SocketType.FLOAT
 
 
-# Global Registry mapping type_id -> BaseNode subclass
-NODE_REGISTRY: Dict[str, Type[BaseNode]] = {}
+# Global Registry mapping type_id -> BaseNode subclass (shared singleton across package/standalone imports)
+_existing_registry = None
+for _k, _mod in list(sys.modules.items()):
+    if (_k == "node_base" or _k.endswith(".node_base")) and hasattr(_mod, "NODE_REGISTRY"):
+        _existing_registry = _mod.NODE_REGISTRY
+        break
+
+NODE_REGISTRY: Dict[str, Type[BaseNode]] = _existing_registry if _existing_registry is not None else {}
 
 
 def register_node(cls: Type[BaseNode]) -> Type[BaseNode]:
@@ -49,10 +55,11 @@ def register_node(cls: Type[BaseNode]) -> Type[BaseNode]:
     if not getattr(cls, "type_id", ""):
         raise ValueError(f"Node class {cls.__name__} must define a unique 'type_id' string.")
     if cls.type_id in NODE_REGISTRY and NODE_REGISTRY[cls.type_id] is not cls:
-        import logging
-        logging.getLogger("ingetrazo.plugins").warning(
-            f"Duplicate type_id '{cls.type_id}' registered by {cls.__name__}, overwriting {NODE_REGISTRY[cls.type_id].__name__}"
-        )
+        if cls.__name__ != NODE_REGISTRY[cls.type_id].__name__:
+            import logging
+            logging.getLogger("ingetrazo.plugins").warning(
+                f"Duplicate type_id '{cls.type_id}' registered by {cls.__name__}, overwriting {NODE_REGISTRY[cls.type_id].__name__}"
+            )
     NODE_REGISTRY[cls.type_id] = cls
 
     # Cross-module synchronization across sys.modules
@@ -80,6 +87,14 @@ class BaseNode:
 
     # Set to True if this node pushes geometry to IngeTrazo's viewport
     is_output_node: bool = False
+
+    # Visual Icon & Badge Configuration
+    icon: Optional[str] = None         # Filename in addon's icons/ folder or absolute path
+    icon_tag: Optional[str] = None     # 1-4 character badge text or emoji (e.g. "SN", "WP", "🧱", "📐")
+
+    # Addon metadata populated during discovery
+    _addon_dir: Optional[str] = None
+    _addon_icons_dir: Optional[str] = None
 
     inputs: List[InputSpec] = []
     outputs: List[OutputSpec] = []

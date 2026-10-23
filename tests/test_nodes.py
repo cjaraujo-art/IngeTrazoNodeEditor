@@ -1595,5 +1595,235 @@ class TestIssue4Fixes(unittest.TestCase):
                     sys.modules[k] = mod
 
 
+class TestCustomNodes(unittest.TestCase):
+    def test_custom_nodes_dirs(self):
+        from nodes import get_custom_nodes_dirs, get_primary_custom_nodes_dir
+        dirs = get_custom_nodes_dirs()
+        self.assertIsInstance(dirs, list)
+        self.assertGreater(len(dirs), 0)
+        primary = get_primary_custom_nodes_dir()
+        self.assertIsInstance(primary, Path)
+        self.assertTrue(primary.exists())
+
+    def test_template_custom_nodes_registered(self):
+        self.assertIn("custom.wall_panel", NODE_REGISTRY)
+        self.assertIn("custom.wave_profile", NODE_REGISTRY)
+        self.assertIn("custom.formula_eval", NODE_REGISTRY)
+
+        # Test evaluating custom formula node: f(x, y) = scale * (a * x^2 + b * y + c)
+        engine = GraphEngine()
+        fn = engine.add_node("custom.formula_eval")
+        fn.set_param("x", 5.0)
+        fn.set_param("y", 3.0)
+        # 1.0 * (1.0 * 25 + 2.0 * 3 + 0) = 31.0
+        engine.evaluate()
+        self.assertEqual(fn.cached_outputs.get("result"), 31.0)
+
+        # Test evaluating custom wave profile curve node
+        wn = engine.add_node("custom.wave_profile")
+        wn.set_param("length", 10.0)
+        wn.set_param("amplitude", 2.0)
+        wn.set_param("wavelength", 5.0)
+        engine.evaluate()
+        curve = wn.cached_outputs.get("curve")
+        self.assertIsInstance(curve, CurveData)
+        self.assertGreater(len(curve.points), 10)
+
+    def test_create_and_discover_custom_node(self):
+        import tempfile
+        from nodes import create_custom_node_file, discover_nodes
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            py_file, cls_name = create_custom_node_file(
+                "Dynamic Test Fin",
+                category="CustomTest",
+                target_dir=tmp_path,
+            )
+            self.assertTrue(py_file.exists())
+            self.assertEqual(cls_name, "DynamicTestFinNode")
+
+            # Load the custom node from the temporary directory
+            from nodes import _load_py_file
+            import node_base
+            errors = []
+            loaded = _load_py_file(py_file, reload_modules=True, errors=errors)
+            self.assertTrue(loaded, f"Failed to load: {errors}")
+
+            # Verify it registered into NODE_REGISTRY
+            expected_type_id = "custom.dynamic_test_fin"
+            self.assertIn(expected_type_id, NODE_REGISTRY)
+
+            # Test executing the freshly generated custom node
+            engine = GraphEngine()
+            node = engine.add_node(expected_type_id)
+            node.set_param("width", 2.5)
+            node.set_param("depth", 1.5)
+            node.set_param("height", 4.0)
+            engine.evaluate()
+
+            mesh = node.cached_outputs.get("mesh")
+            self.assertIsInstance(mesh, MeshData)
+            self.assertEqual(len(mesh.vertices), 8)
+            self.assertEqual(len(mesh.faces), 6)
+
+    def test_single_file_addon_category_from_filename(self):
+        """Verifies that a file like 'seg nodes.py' automatically sets category to 'Seg Nodes'."""
+        import tempfile
+        from nodes import _load_py_file
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            file_path = Path(tmp_dir) / "seg nodes.py"
+            content = '''# seg nodes
+from core_types import Vec3, MeshData, SocketType
+from node_base import BaseNode, InputSpec, OutputSpec, register_node
+
+@register_node
+class SegWallOpenerNode(BaseNode):
+    type_id = "seg.wall_opener_test"
+    title = "Seg Wall Opener"
+    icon_tag = "WO"
+    inputs = [InputSpec("w", "Width", SocketType.FLOAT, default=1.0)]
+    outputs = [OutputSpec("mesh", "Mesh", SocketType.MESH)]
+
+    def compute(self, w: float):
+        return {"mesh": MeshData.create_box(Vec3(0, 0, 0), w, 1.0, 1.0)}
+'''
+            file_path.write_text(content, encoding="utf-8")
+            errors = []
+            file_category = file_path.stem.replace("_", " ").strip().title()
+            loaded = _load_py_file(file_path, reload_modules=True, errors=errors, default_category=file_category)
+            self.assertTrue(loaded, f"Load failed: {errors}")
+
+            self.assertIn("seg.wall_opener_test", NODE_REGISTRY)
+            node_cls = NODE_REGISTRY["seg.wall_opener_test"]
+            self.assertEqual(node_cls.category, "Seg Nodes")
+            self.assertEqual(node_cls.icon_tag, "WO")
+
+    def test_folder_addon_pack_scaffolding_and_icons(self):
+        """Verifies folder-based addon packs with __init__.py, icons/ folder, and icon_tag."""
+        import tempfile
+        from nodes import create_addon_folder, _load_py_file
+        from PySide6.QtWidgets import QApplication
+        from ui_canvas import get_node_icon
+
+        app = QApplication.instance() or QApplication([])
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            addon_dir, init_py = create_addon_folder("Facade Tools", target_dir=tmp_path)
+
+            self.assertTrue(addon_dir.is_dir())
+            self.assertTrue(init_py.is_file())
+            self.assertTrue((addon_dir / "icons").is_dir())
+
+            errors = []
+            loaded = _load_py_file(init_py, reload_modules=True, errors=errors, default_category="Facade Tools", addon_dir=addon_dir)
+            self.assertTrue(loaded, f"Load failed: {errors}")
+
+            type_id = "facade_tools.sample"
+            self.assertIn(type_id, NODE_REGISTRY)
+            node_cls = NODE_REGISTRY[type_id]
+            self.assertEqual(node_cls.category, "Facade Tools")
+            self.assertEqual(node_cls.icon_tag, "FT")
+            self.assertEqual(node_cls._addon_dir, str(addon_dir.resolve()))
+            self.assertEqual(node_cls._addon_icons_dir, str((addon_dir / "icons").resolve()))
+
+            # Verify dynamic badge icon renders
+            icon = get_node_icon(type_id, is_dark=True)
+            self.assertFalse(icon.isNull())
+
+            # Test icon file resolution from addon's icons/ folder
+            from PySide6.QtGui import QPixmap, QColor
+            from PySide6.QtCore import Qt
+            pm = QPixmap(16, 16)
+            pm.fill(QColor(40, 120, 200))
+            dummy_icon_path = addon_dir / "icons" / "my_icon.png"
+            pm.save(str(dummy_icon_path), "PNG")
+
+            node_cls.icon = "my_icon.png"
+            from ui_canvas import _ICON_CACHE
+            _ICON_CACHE.clear()
+            resolved_icon = get_node_icon(type_id, is_dark=True)
+            self.assertFalse(resolved_icon.isNull())
+
+    def test_delete_addon_folder_unregisters_cleanly(self):
+        """Verifies that creating an addon folder and then deleting it removes all nodes on reload without errors."""
+        import shutil
+        from nodes import create_addon_folder, discover_nodes, get_primary_custom_nodes_dir
+
+        primary_dir = get_primary_custom_nodes_dir()
+        addon_dir, init_py = create_addon_folder("Temporary Test Pack", target_dir=primary_dir)
+
+        try:
+            # Discover and verify registered
+            errs1 = discover_nodes(reload_modules=True)
+            self.assertEqual(errs1, [], f"Reload failed with: {errs1}")
+            self.assertIn("temporary_test_pack.sample", NODE_REGISTRY)
+
+            # Now delete the entire addon folder
+            shutil.rmtree(addon_dir)
+            self.assertFalse(addon_dir.exists())
+
+            # Reload again — must clean up stale nodes without 'spec not found' errors!
+            errs2 = discover_nodes(reload_modules=True)
+            self.assertEqual(errs2, [], f"Reload after delete produced errors: {errs2}")
+            self.assertNotIn("temporary_test_pack.sample", NODE_REGISTRY)
+
+        finally:
+            if addon_dir.exists():
+                shutil.rmtree(addon_dir)
+            NODE_REGISTRY.pop("temporary_test_pack.sample", None)
+
+
+class TestCanvasMinimap(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        discover_nodes(reload_modules=False)
+
+    def test_minimap_initialization_and_toggle(self):
+        """Verifies that the minimap is instantiated, parented to the view viewport, and toggled by btn_minimap."""
+        from PySide6.QtWidgets import QApplication
+        from PySide6.QtCore import QPointF
+        from ui_canvas import NodeEditorWidget, CanvasMinimap
+        from engine import GraphEngine
+
+        app = QApplication.instance() or QApplication([])
+        engine = GraphEngine()
+        editor = NodeEditorWidget(engine=engine, on_bake=lambda x: None, on_live_toggled=lambda x: None)
+        editor.resize(800, 600)
+        editor.show()
+        app.processEvents()
+
+        # 1. Existence and parenting
+        self.assertTrue(hasattr(editor, "minimap"))
+        self.assertIsInstance(editor.minimap, CanvasMinimap)
+        self.assertEqual(editor.minimap.parent(), editor.view.viewport())
+        self.assertTrue(editor.minimap.isVisible())
+
+        # 2. Toggle button state
+        self.assertTrue(hasattr(editor, "btn_minimap"))
+        self.assertTrue(editor.btn_minimap.isChecked())
+
+        # 3. Toggle off
+        editor.btn_minimap.setChecked(False)
+        app.processEvents()
+        self.assertFalse(editor.minimap.isVisible())
+
+        # 4. Toggle on
+        editor.btn_minimap.setChecked(True)
+        app.processEvents()
+        self.assertTrue(editor.minimap.isVisible())
+
+        # 5. Minimap navigation coordinate conversion
+        sr = editor.minimap._compute_scene_rect()
+        self.assertGreater(sr.width(), 0)
+        self.assertGreater(sr.height(), 0)
+        pt_scene = editor.minimap._minimap_to_scene(sr, QPointF(50, 50))
+        pt_minimap = editor.minimap._scene_to_minimap(sr, pt_scene)
+        self.assertAlmostEqual(pt_minimap.x(), 50.0, delta=2.0)
+        self.assertAlmostEqual(pt_minimap.y(), 50.0, delta=2.0)
+
+
 if __name__ == "__main__":
     unittest.main()
