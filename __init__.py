@@ -1,4 +1,4 @@
-﻿# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-License-Identifier: GPL-3.0-or-later
 """IngeTrazo Parametric Node Editor Extension Entry Point."""
 
 from __future__ import annotations

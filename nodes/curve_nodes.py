@@ -1,4 +1,4 @@
-﻿# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-License-Identifier: GPL-3.0-or-later
 """Parametric 2D/3D Curve Shape Nodes."""
 
 from __future__ import annotations

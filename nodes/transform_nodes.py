@@ -1,4 +1,4 @@
-﻿# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-License-Identifier: GPL-3.0-or-later
 """Parametric Geometry Transformation, Extrusion, Revolve, and Array Nodes."""
 
 from __future__ import annotations

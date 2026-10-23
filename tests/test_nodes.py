@@ -1,4 +1,4 @@
-﻿# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-License-Identifier: GPL-3.0-or-later
 """Automated unit test suite for the IngeTrazo Parametric Node Editor."""
 
 import math
