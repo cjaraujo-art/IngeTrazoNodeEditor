@@ -1798,24 +1798,26 @@ class TestCanvasMinimap(unittest.TestCase):
         # 1. Existence and parenting
         self.assertTrue(hasattr(editor, "minimap"))
         self.assertIsInstance(editor.minimap, CanvasMinimap)
-        self.assertEqual(editor.minimap.parent(), editor.view.viewport())
+        self.assertEqual(editor.minimap.parent(), editor.view)
         self.assertTrue(editor.minimap.isVisible())
 
         # 2. Toggle button state
         self.assertTrue(hasattr(editor, "btn_minimap"))
         self.assertTrue(editor.btn_minimap.isChecked())
 
-        # 3. Toggle off
-        editor.btn_minimap.setChecked(False)
+        # 3. Close via close button in panel header
+        editor.minimap.btn_close.click()
         app.processEvents()
         self.assertFalse(editor.minimap.isVisible())
+        self.assertFalse(editor.btn_minimap.isChecked())
 
-        # 4. Toggle on
+        # 4. Toggle on via toolbar button
         editor.btn_minimap.setChecked(True)
         app.processEvents()
         self.assertTrue(editor.minimap.isVisible())
 
         # 5. Minimap navigation coordinate conversion
+        editor.minimap.canvas.paintEvent(None)
         sr = editor.minimap._compute_scene_rect()
         self.assertGreater(sr.width(), 0)
         self.assertGreater(sr.height(), 0)

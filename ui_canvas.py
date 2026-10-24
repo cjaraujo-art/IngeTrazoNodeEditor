@@ -3414,320 +3414,338 @@ class NodeRibbonBar(QWidget):
 
 
 # ============================================================================
-# MINIMAP OVERLAY (ComfyUI-style navigation overview)
+# MINIMAP NAVIGATOR (1:1 Parity with GeosNodeNetwork NodeGraphCanvas.Minimap.cs)
 # ============================================================================
-class CanvasMinimap(QWidget):
-    """Self-contained semi-transparent minimap overlay for navigating the canvas.
-
-    Renders scaled-down node rectangles and wires, draws a viewport rectangle
-    showing the currently visible area, and supports click-to-navigate and
-    drag-to-pan (matching ComfyUI minimap behavior).
-    """
-
-    _MINIMAP_W = 210
-    _MINIMAP_H = 145
-    _MARGIN = 12           # inset from canvas corner
-    _BG_COLOR = QColor(18, 22, 28, 225)
-    _BORDER_COLOR = QColor(60, 68, 82, 200)
-    _VIEWPORT_COLOR = QColor(97, 175, 239, 45)    # #61afef translucent fill
-    _VIEWPORT_BORDER = QColor(97, 175, 239, 230)  # #61afef bright border
-    _WIRE_COLOR = QColor(90, 105, 125, 140)
-    _NODE_BODY = QColor(40, 44, 52, 220)
-    _NODE_BORDER = QColor(58, 64, 76, 160)
+class MinimapCanvas(QWidget):
+    """GPU-accelerated smooth canvas renderer for the minimap."""
 
     def __init__(self, canvas_view: "NodeCanvasView", parent: Optional[QWidget] = None) -> None:
-        target_parent = parent or canvas_view.viewport()
-        super().__init__(target_parent)
+        super().__init__(parent)
         self.canvas_view = canvas_view
-        self._dragging_viewport = False
-        self._drag_scene_offset = QPointF(0, 0)
-        self._scene_rect = QRectF(-600, -400, 1200, 800)
-        self._refresh_timer = QTimer(self)
-        self._refresh_timer.setInterval(250)  # Polling to update graph bounds when nodes are added or moved
-        self._refresh_timer.timeout.connect(self._on_idle_refresh)
-        self._refresh_timer.start()
-        self.setFixedSize(self._MINIMAP_W, self._MINIMAP_H)
+        self._is_dragging = False
+        self.scale: float = 1.0
+        self.world_min_x: float = 0.0
+        self.world_min_y: float = 0.0
+        self.offset_x: float = 0.0
+        self.offset_y: float = 0.0
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setToolTip(tr("Minimap – click or drag to navigate"))
-        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
 
-        # Track view / viewport resize to remain anchored
-        canvas_view.viewport().installEventFilter(self)
-        canvas_view.installEventFilter(self)
-
-        # Live viewport updates when panning or zooming canvas (instant redraw without shifting graph bounds)
-        canvas_view.horizontalScrollBar().valueChanged.connect(lambda _: self.update())
-        canvas_view.verticalScrollBar().valueChanged.connect(lambda _: self.update())
-
-        self._reposition()
-        self._scene_rect = self._compute_scene_rect()
-        self.show()
-
-    # ── Geometry helpers ────────────────────────────────────────────────
-    def eventFilter(self, obj: Any, event: Any) -> bool:
-        """Reposition when the parent view or viewport is resized or shown."""
-        if event.type() in (QEvent.Type.Resize, QEvent.Type.Show):
-            self._reposition()
-            self.update()
-        return False
-
-    def _reposition(self) -> None:
-        """Anchor the minimap to the bottom-right corner of the parent."""
-        p = self.parent()
-        if p is None:
+    def navigate_to(self, m_pos: QPointF) -> None:
+        """Map mouse point on minimap directly to scene coords and center canvas."""
+        if self.scale <= 0:
             return
-        pw, ph = p.width(), p.height()
-        if pw <= 1 or ph <= 1:
-            return
-        # Dynamically scale down minimap if host panel is very narrow (< 380px)
-        w = min(self._MINIMAP_W, max(110, int(pw * 0.45)))
-        h = int(w * (self._MINIMAP_H / self._MINIMAP_W))
-        self.resize(w, h)
-        x = pw - w - self._MARGIN
-        y = ph - h - self._MARGIN
-        self.move(max(0, x), max(0, y))
-        self.raise_()
+        wx = (m_pos.x() - self.offset_x) / self.scale + self.world_min_x
+        wy = (m_pos.y() - self.offset_y) / self.scale + self.world_min_y
 
-    def _compute_scene_rect(self) -> QRectF:
-        """Return the bounding rect of all nodes in the scene with padding (ComfyUI parity).
-
-        Decoupled from visible viewport: dragging the viewport or zooming the canvas
-        will NEVER scale or shift node positions on the minimap.
-        """
-        sc = self.canvas_view.scene()
-        if sc is None:
-            return QRectF(-600, -400, 1200, 800)
-
-        node_items = list(getattr(sc, "node_items", {}).values())
-        if not node_items:
-            # Fallback when canvas has no nodes: use current viewport area
-            vp = self.canvas_view.viewport()
-            view_tl = self.canvas_view.mapToScene(QPoint(0, 0))
-            view_br = self.canvas_view.mapToScene(QPoint(vp.width(), vp.height()))
-            return QRectF(view_tl, view_br).normalized().adjusted(-300, -300, 300, 300)
-
-        min_x = float("inf")
-        min_y = float("inf")
-        max_x = float("-inf")
-        max_y = float("-inf")
-
-        for ni in node_items:
-            try:
-                pos = ni.pos()
-                nw = float(getattr(ni, "WIDTH", 228.0))
-                nh = float(getattr(ni, "height", 60.0))
-                min_x = min(min_x, pos.x())
-                min_y = min(min_y, pos.y())
-                max_x = max(max_x, pos.x() + nw)
-                max_y = max(max_y, pos.y() + nh)
-            except Exception:
-                continue
-
-        if min_x == float("inf"):
-            return QRectF(-600, -400, 1200, 800)
-
-        gw = max_x - min_x
-        gh = max_y - min_y
-        pad_x = max(160.0, gw * 0.12)
-        pad_y = max(160.0, gh * 0.12)
-
-        return QRectF(min_x - pad_x, min_y - pad_y, max(200.0, gw + 2 * pad_x), max(150.0, gh + 2 * pad_y))
-
-    def _get_transform(self, scene_rect: QRectF) -> Tuple[float, float, float]:
-        """Return (scale, offset_x, offset_y) centering scene_rect within the minimap widget."""
-        sw = scene_rect.width()
-        sh = scene_rect.height()
-        if sw <= 1e-4 or sh <= 1e-4:
-            return 1.0, 0.0, 0.0
-
-        pad = 8.0  # internal margin inside minimap frame
-        avail_w = max(10.0, self.width() - pad * 2)
-        avail_h = max(10.0, self.height() - pad * 2)
-
-        scale = min(avail_w / sw, avail_h / sh)
-        drawn_w = sw * scale
-        drawn_h = sh * scale
-        ox = pad + (avail_w - drawn_w) / 2.0
-        oy = pad + (avail_h - drawn_h) / 2.0
-        return scale, ox, oy
-
-    def _scene_to_minimap(self, scene_rect: QRectF, pt: QPointF) -> QPointF:
-        """Map a scene-space point into minimap widget coordinates."""
-        scale, ox, oy = self._get_transform(scene_rect)
-        x = ox + (pt.x() - scene_rect.left()) * scale
-        y = oy + (pt.y() - scene_rect.top()) * scale
-        return QPointF(x, y)
-
-    def _scene_rect_to_minimap(self, scene_rect: QRectF, r: QRectF) -> QRectF:
-        """Map a scene-space rectangle into minimap widget coordinates."""
-        scale, ox, oy = self._get_transform(scene_rect)
-        x = ox + (r.left() - scene_rect.left()) * scale
-        y = oy + (r.top() - scene_rect.top()) * scale
-        w = r.width() * scale
-        h = r.height() * scale
-        return QRectF(x, y, w, h)
-
-    def _minimap_to_scene(self, scene_rect: QRectF, pt: QPointF) -> QPointF:
-        """Map a minimap widget coordinate back into scene space."""
-        scale, ox, oy = self._get_transform(scene_rect)
-        if scale <= 1e-6:
-            return QPointF(0, 0)
-        sx = scene_rect.left() + (pt.x() - ox) / scale
-        sy = scene_rect.top() + (pt.y() - oy) / scale
-        return QPointF(sx, sy)
-
-    # ── Scheduled repaint ───────────────────────────────────────────────
-    def _on_idle_refresh(self) -> None:
-        if not self._dragging_viewport:
-            self._scene_rect = self._compute_scene_rect()
+        if hasattr(self.canvas_view, "_grow_scene_rect"):
+            self.canvas_view._grow_scene_rect()
+        self.canvas_view.centerOn(QPointF(wx, wy))
         self.update()
 
-    def _schedule_repaint(self) -> None:
-        self._scene_rect = self._compute_scene_rect()
-        self.update()
-
-    # ── Painting ────────────────────────────────────────────────────────
-    def paintEvent(self, event: Any) -> None:  # noqa: N802
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-
-        w = self.width()
-        h = self.height()
-
-        # Background container
-        painter.setPen(QPen(self._BORDER_COLOR, 1.2))
-        painter.setBrush(QBrush(self._BG_COLOR))
-        painter.drawRoundedRect(0, 0, w - 1, h - 1, 6, 6)
-
-        # Small watermark label in top-left corner
-        painter.setFont(QFont("Segoe UI", 7, QFont.Weight.Bold))
-        painter.setPen(QColor(120, 130, 150, 160))
-        painter.drawText(8, 14, "MAP")
-
-        sr = self._scene_rect
-        if sr.isEmpty() or sr.width() <= 10 or sr.height() <= 10:
-            sr = self._compute_scene_rect()
-            self._scene_rect = sr
-
-        sc = self.canvas_view.scene()
-        if sc is None:
-            painter.end()
-            return
-
-        # Clip all internal contents to minimap bounds so wires/viewport don't bleed
-        painter.save()
-        clip_path = QPainterPath()
-        clip_path.addRoundedRect(QRectF(1.0, 1.0, w - 2.0, h - 2.0), 6.0, 6.0)
-        painter.setClipPath(clip_path)
-
-        # Draw wires
-        wire_pen = QPen(self._WIRE_COLOR, 1.0)
-        painter.setPen(wire_pen)
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        for wi in getattr(sc, "wire_items", []):
-            try:
-                if wi.src_sock and wi.dst_sock:
-                    p1 = self._scene_to_minimap(sr, wi.src_sock.scenePos())
-                    p2 = self._scene_to_minimap(sr, wi.dst_sock.scenePos())
-                    painter.drawLine(p1, p2)
-            except Exception:
-                continue
-
-        # Draw node rectangles
-        for node_item in getattr(sc, "node_items", {}).values():
-            try:
-                pos = node_item.pos()
-                nw = getattr(node_item, "WIDTH", 228.0)
-                nh = getattr(node_item, "height", 60.0)
-                r = self._scene_rect_to_minimap(sr, QRectF(pos.x(), pos.y(), nw, nh))
-
-                # Node body
-                hr, hg, hb = node_item.node.header_color
-                header_col = QColor(hr, hg, hb, 210)
-
-                # Selected?
-                if node_item.isSelected():
-                    painter.setPen(QPen(QColor(246, 185, 59, 220), 1.2))
-                else:
-                    painter.setPen(QPen(self._NODE_BORDER, 0.7))
-
-                painter.setBrush(QBrush(self._NODE_BODY))
-                painter.drawRoundedRect(r, 2.0, 2.0)
-
-                # Header stripe
-                header_r = QRectF(r.x(), r.y(), r.width(), max(2.0, r.height() * 0.32))
-                painter.setBrush(QBrush(header_col))
-                painter.setPen(Qt.PenStyle.NoPen)
-                painter.drawRoundedRect(header_r, 2.0, 2.0)
-            except (RuntimeError, AttributeError):
-                continue
-
-        # Draw viewport rectangle (ComfyUI parity)
-        vp = self.canvas_view.viewport()
-        view_tl = self.canvas_view.mapToScene(QPoint(0, 0))
-        view_br = self.canvas_view.mapToScene(QPoint(vp.width(), vp.height()))
-        vp_scene_rect = QRectF(view_tl, view_br).normalized()
-        vp_rect = self._scene_rect_to_minimap(sr, vp_scene_rect)
-
-        painter.setBrush(QBrush(self._VIEWPORT_COLOR))
-        painter.setPen(QPen(self._VIEWPORT_BORDER, 1.4))
-        painter.drawRoundedRect(vp_rect, 2.0, 2.0)
-
-        painter.restore()
-        painter.end()
-
-    # ── Mouse interaction (click-to-navigate, drag viewport) ────────────
     def mousePressEvent(self, event: QMouseEvent) -> None:
-        if event.button() != Qt.MouseButton.LeftButton:
-            return
-
-        sr = self._scene_rect
-        if sr.isEmpty() or sr.width() <= 10 or sr.height() <= 10:
-            sr = self._compute_scene_rect()
-            self._scene_rect = sr
-
-        vp = self.canvas_view.viewport()
-        view_tl = self.canvas_view.mapToScene(QPoint(0, 0))
-        view_br = self.canvas_view.mapToScene(QPoint(vp.width(), vp.height()))
-        vp_scene_rect = QRectF(view_tl, view_br).normalized()
-        vp_rect = self._scene_rect_to_minimap(sr, vp_scene_rect)
-
-        click = event.position()
-        if vp_rect.contains(click):
-            self._dragging_viewport = True
-            click_scene = self._minimap_to_scene(sr, click)
-            vp_center_scene = self.canvas_view.mapToScene(QPoint(vp.width() // 2, vp.height() // 2))
-            self._drag_scene_offset = click_scene - vp_center_scene
-        else:
-            self._dragging_viewport = True
-            self._drag_scene_offset = QPointF(0, 0)
-            target_scene = self._minimap_to_scene(sr, click)
-            if hasattr(self.canvas_view, "_grow_scene_rect"):
-                self.canvas_view._grow_scene_rect()
-            self.canvas_view.centerOn(target_scene)
-            self.update()
-
-        event.accept()
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._is_dragging = True
+            self.grabMouse()
+            self.navigate_to(event.position())
+            event.accept()
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
-        if self._dragging_viewport and (event.buttons() & Qt.MouseButton.LeftButton):
-            sr = self._scene_rect
-            click_scene = self._minimap_to_scene(sr, event.position())
-            target_scene = click_scene - self._drag_scene_offset
-            if hasattr(self.canvas_view, "_grow_scene_rect"):
-                self.canvas_view._grow_scene_rect()
-            self.canvas_view.centerOn(target_scene)
-            self.update()
+        if self._is_dragging and (event.buttons() & Qt.MouseButton.LeftButton):
+            self.navigate_to(event.position())
             event.accept()
         else:
             super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
-            self._dragging_viewport = False
+            self._is_dragging = False
+            self.releaseMouse()
             event.accept()
         else:
             super().mouseReleaseEvent(event)
+
+    def wheelEvent(self, event: QWheelEvent) -> None:
+        self.canvas_view.wheelEvent(event)
+        self.update()
+        event.accept()
+
+    def paintEvent(self, event: Any) -> None:  # noqa: N802
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        w = float(self.width())
+        h = float(self.height())
+        if w <= 0 or h <= 0:
+            painter.end()
+            return
+
+        # Background container
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QBrush(QColor(15, 17, 21)))
+        painter.drawRoundedRect(0, 0, int(w), int(h), 8, 8)
+
+        # Clip content to rounded inner canvas
+        clip_path = QPainterPath()
+        clip_path.addRoundedRect(QRectF(0, 0, w, h), 8, 8)
+        painter.setClipPath(clip_path)
+
+        sc = self.canvas_view.scene()
+        if sc is None:
+            painter.end()
+            return
+
+        nodes = list(getattr(sc, "node_items", {}).values())
+        if not nodes:
+            min_x, min_y, max_x, max_y = -200.0, -200.0, 800.0, 600.0
+        else:
+            min_x = min(ni.pos().x() for ni in nodes)
+            min_y = min(ni.pos().y() for ni in nodes)
+            max_x = max(ni.pos().x() + getattr(ni, "WIDTH", 228.0) for ni in nodes)
+            max_y = max(ni.pos().y() + getattr(ni, "height", 60.0) for ni in nodes)
+
+        pad = 120.0
+        min_x -= pad
+        min_y -= pad
+        max_x += pad
+        max_y += pad
+
+        world_w = max(100.0, max_x - min_x)
+        world_h = max(100.0, max_y - min_y)
+
+        self.scale = min(w / world_w, h / world_h)
+        self.world_min_x = min_x
+        self.world_min_y = min_y
+        self.offset_x = (w - world_w * self.scale) / 2.0
+        self.offset_y = (h - world_h * self.scale) / 2.0
+
+        scale = self.scale
+        ox = self.offset_x
+        oy = self.offset_y
+
+        # 1. Draw connections (smooth cubic bezier curves with socket type colors)
+        for wi in getattr(sc, "wire_items", []):
+            try:
+                if wi.src_sock and wi.dst_sock:
+                    sp = wi.src_sock.scenePos()
+                    tp = wi.dst_sock.scenePos()
+                    sx = (sp.x() - min_x) * scale + ox
+                    sy = (sp.y() - min_y) * scale + oy
+                    tx = (tp.x() - min_x) * scale + ox
+                    ty = (tp.y() - min_y) * scale + oy
+
+                    dx = abs(tx - sx) * 0.45
+                    path = QPainterPath(QPointF(sx, sy))
+                    path.cubicTo(sx + dx, sy, tx - dx, ty, tx, ty)
+
+                    sock_col = SOCKET_COLORS.get(wi.src_sock.type, QColor(140, 150, 170))
+                    wire_pen = QPen(QColor(sock_col.red(), sock_col.green(), sock_col.blue(), 150), 1.0)
+                    painter.setPen(wire_pen)
+                    painter.setBrush(Qt.BrushStyle.NoBrush)
+                    painter.drawPath(path)
+            except Exception:
+                continue
+
+        # 2. Draw node rectangles
+        for ni in nodes:
+            try:
+                nw = getattr(ni, "WIDTH", 228.0)
+                nh = getattr(ni, "height", 60.0)
+                mx = (ni.pos().x() - min_x) * scale + ox
+                my = (ni.pos().y() - min_y) * scale + oy
+                mw = max(4.0, nw * scale)
+                mh = max(3.0, nh * scale)
+                rect = QRectF(mx, my, mw, mh)
+
+                hr, hg, hb = ni.node.header_color
+                if ni.isSelected():
+                    painter.setPen(QPen(QColor(246, 185, 59, 230), 1.0))
+                    painter.setBrush(QBrush(QColor(52, 115, 170, 230)))
+                else:
+                    painter.setPen(QPen(QColor(90, 20, 30, 45), 0.5))
+                    painter.setBrush(QBrush(QColor(52, 115, 170, 220)))
+
+                painter.drawRoundedRect(rect, 1.5, 1.5)
+
+                # Header stripe
+                header_h = max(2.0, mh * 0.35)
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(QBrush(QColor(hr, hg, hb, 230)))
+                painter.drawRoundedRect(QRectF(mx, my, mw, header_h), 1.5, 1.5)
+            except Exception:
+                continue
+
+        # 3. Draw Viewport outline box (White stroke + translucent fill, 1:1 with NodeEditorLatest)
+        vp = self.canvas_view.viewport()
+        v_tl = self.canvas_view.mapToScene(QPoint(0, 0))
+        v_br = self.canvas_view.mapToScene(QPoint(vp.width(), vp.height()))
+
+        v_left = (min(v_tl.x(), v_br.x()) - min_x) * scale + ox
+        v_top = (min(v_tl.y(), v_br.y()) - min_y) * scale + oy
+        v_w = max(4.0, abs(v_br.x() - v_tl.x()) * scale)
+        v_h = max(4.0, abs(v_br.y() - v_tl.y()) * scale)
+        vp_r = QRectF(v_left, v_top, v_w, v_h)
+
+        painter.setPen(QPen(QColor(255, 255, 255, 230), 1.5))
+        painter.setBrush(QBrush(QColor(255, 255, 255, 30)))
+        painter.drawRoundedRect(vp_r, 2.0, 2.0)
+
+        painter.end()
+
+
+class CanvasMinimap(QFrame):
+    """Floating Minimap Panel matching GeosNodeNetwork NodeGraphCanvas.Minimap.cs."""
+
+    _MAP_W = 260
+    _MAP_H = 190
+
+    def __init__(
+        self,
+        canvas_view: "NodeCanvasView",
+        on_close: Optional[Callable[[], None]] = None,
+        parent: Optional[QWidget] = None,
+    ) -> None:
+        target_parent = parent or canvas_view
+        super().__init__(target_parent)
+        self.canvas_view = canvas_view
+        self.on_close = on_close
+
+        self.setFixedSize(self._MAP_W, self._MAP_H)
+        self.setStyleSheet("""
+            CanvasMinimap {
+                background-color: rgba(20, 22, 28, 235);
+                border: 1.2px solid rgba(70, 75, 95, 140);
+                border-radius: 12px;
+            }
+        """)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(8, 6, 8, 8)
+        layout.setSpacing(4)
+
+        # Header Bar
+        header = QHBoxLayout()
+        header.setContentsMargins(4, 0, 2, 0)
+        header.setSpacing(6)
+
+        self.lbl_icon = QLabel("🗺️")
+        self.lbl_icon.setStyleSheet("font-size: 11px; background: transparent;")
+        header.addWidget(self.lbl_icon)
+
+        self.lbl_title = QLabel(tr("Map"))
+        self.lbl_title.setStyleSheet(
+            "font-family: 'Segoe UI', sans-serif; font-size: 11px; font-weight: 600; color: #c8c8d2; background: transparent;"
+        )
+        header.addWidget(self.lbl_title)
+        header.addStretch(1)
+
+        self.btn_close = QPushButton("✕")
+        self.btn_close.setFixedSize(18, 18)
+        self.btn_close.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_close.setToolTip(tr("Close Map"))
+        self.btn_close.setStyleSheet("""
+            QPushButton {
+                background: transparent;
+                border: none;
+                color: #8c8c96;
+                font-size: 11px;
+                font-weight: bold;
+                padding: 0;
+            }
+            QPushButton:hover {
+                color: #ffffff;
+            }
+        """)
+        self.btn_close.clicked.connect(self._handle_close)
+        header.addWidget(self.btn_close)
+        layout.addLayout(header)
+
+        # Inner Canvas Container
+        self.canvas = MinimapCanvas(canvas_view, self)
+        layout.addWidget(self.canvas, stretch=1)
+
+        # Track view resizing and scrolling
+        canvas_view.installEventFilter(self)
+        canvas_view.horizontalScrollBar().valueChanged.connect(lambda _: self.canvas.update())
+        canvas_view.verticalScrollBar().valueChanged.connect(lambda _: self.canvas.update())
+
+        # Idle polling to refresh bounds when nodes are added or moved
+        self._refresh_timer = QTimer(self)
+        self._refresh_timer.setInterval(250)
+        self._refresh_timer.timeout.connect(self.canvas.update)
+        self._refresh_timer.start()
+
+        self.setToolTip(tr("Minimap – click or drag to navigate"))
+        self._reposition()
+        self.show()
+
+    def _handle_close(self) -> None:
+        self.hide()
+        if self.on_close:
+            self.on_close()
+
+    def eventFilter(self, obj: Any, event: Any) -> bool:
+        if event.type() in (QEvent.Type.Resize, QEvent.Type.Show):
+            self._reposition()
+        return False
+
+    def _reposition(self) -> None:
+        """Position panel at bottom-right corner of the canvas view."""
+        p = self.parent()
+        if p is None:
+            return
+        pw, ph = p.width(), p.height()
+        if pw <= 1 or ph <= 1:
+            return
+
+        w = min(self._MAP_W, max(120, int(pw * 0.45)))
+        h = int(w * (self._MAP_H / self._MAP_W))
+        self.resize(w, h)
+
+        x = pw - w - 20
+        y = ph - h - 30
+        self.move(max(10, x), max(10, y))
+        self.raise_()
+
+    def retranslate_ui(self) -> None:
+        self.lbl_title.setText(tr("Map"))
+        self.btn_close.setToolTip(tr("Close Map"))
+        self.setToolTip(tr("Minimap – click or drag to navigate"))
+
+    # ── Backward compatibility helpers ──────────────────────────────────
+    def _get_transform(self, sr: QRectF) -> Tuple[float, float, float]:
+        return self.canvas.scale, self.canvas.offset_x, self.canvas.offset_y
+
+    def _scene_rect_to_minimap(self, sr: QRectF, r: QRectF) -> QRectF:
+        x = (r.left() - self.canvas.world_min_x) * self.canvas.scale + self.canvas.offset_x
+        y = (r.top() - self.canvas.world_min_y) * self.canvas.scale + self.canvas.offset_y
+        w = r.width() * self.canvas.scale
+        h = r.height() * self.canvas.scale
+        return QRectF(x, y, w, h)
+
+    def _compute_scene_rect(self) -> QRectF:
+        sc = self.canvas_view.scene()
+        nodes = list(getattr(sc, "node_items", {}).values()) if sc else []
+        if not nodes:
+            return QRectF(-200.0, -200.0, 1000.0, 800.0)
+        min_x = min(ni.pos().x() for ni in nodes)
+        min_y = min(ni.pos().y() for ni in nodes)
+        max_x = max(ni.pos().x() + getattr(ni, "WIDTH", 228.0) for ni in nodes)
+        max_y = max(ni.pos().y() + getattr(ni, "height", 60.0) for ni in nodes)
+        pad = 120.0
+        return QRectF(min_x - pad, min_y - pad, (max_x - min_x) + 2 * pad, (max_y - min_y) + 2 * pad)
+
+    def _minimap_to_scene(self, sr: QRectF, pt: QPointF) -> QPointF:
+        if self.canvas.scale <= 0:
+            return QPointF(0, 0)
+        wx = (pt.x() - self.canvas.offset_x) / self.canvas.scale + self.canvas.world_min_x
+        wy = (pt.y() - self.canvas.offset_y) / self.canvas.scale + self.canvas.world_min_y
+        return QPointF(wx, wy)
+
+    def _scene_to_minimap(self, sr: QRectF, pt: QPointF) -> QPointF:
+        mx = (pt.x() - self.canvas.world_min_x) * self.canvas.scale + self.canvas.offset_x
+        my = (pt.y() - self.canvas.world_min_y) * self.canvas.scale + self.canvas.offset_y
+        return QPointF(mx, my)
 
     def wheelEvent(self, event: QWheelEvent) -> None:
         # Forward zoom events to canvas view
@@ -3951,7 +3969,11 @@ class NodeEditorWidget(QWidget):
         self.view = NodeCanvasView(self.scene)
         self.view.parent_editor = self
 
-        self.minimap = CanvasMinimap(self.view)
+        self.minimap = CanvasMinimap(
+            self.view,
+            on_close=lambda: self.btn_minimap.setChecked(False),
+            parent=self.view,
+        )
 
         self.inspector = NodeInspectorPanel(self)
         self.inspector.parent_editor = self
@@ -4047,7 +4069,8 @@ class NodeEditorWidget(QWidget):
             self.minimap.setVisible(visible)
             if visible:
                 self.minimap._reposition()
-                self.minimap._schedule_repaint()
+                if hasattr(self.minimap, "canvas"):
+                    self.minimap.canvas.update()
 
     def _spawn_node_from_ribbon(self, type_id: str) -> None:
         view_rect = self.view.viewport().rect()
@@ -4321,7 +4344,7 @@ class NodeEditorWidget(QWidget):
             self.btn_minimap.setText(tr("🗺️ Map"))
             self.btn_minimap.setToolTip(tr("Toggle Minimap (navigation overview)"))
         if hasattr(self, "minimap") and self.minimap:
-            self.minimap.setToolTip(tr("Minimap – click or drag to navigate"))
+            self.minimap.retranslate_ui()
 
         if hasattr(self, "_dock") and self._dock is not None:
             self._update_popout_button(self._dock.isFloating() if hasattr(self._dock, "isFloating") else False)
