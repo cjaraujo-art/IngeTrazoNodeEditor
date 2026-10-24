@@ -862,6 +862,7 @@ def setup(app: Any) -> None:
         if hasattr(app, "add_panel"):
             dock = app.add_panel("Node Editor", editor_widget)
             if dock is not None:
+                dock.setMinimumWidth(0)
                 editor_widget.set_dock(dock)
 
         if win:
