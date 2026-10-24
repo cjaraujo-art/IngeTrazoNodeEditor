@@ -22,13 +22,14 @@ class ReferenceFaceNode(BaseNode):
         "Reference one or multiple faces/surfaces from the IngeTrazo 3D viewport into the node graph.\n"
         "Click '📌 Set Selected Face(s)' on the node card to store the currently selected face(s).\n"
         "Automatically extracts the outer perimeter and all courtyard/interior holes for each face.\n"
-        "The referenced faces are saved directly in the file (.itgraph) so they are remembered\n"
-        "when reopening."
+        "Live tracking automatically keeps faces in sync when moved or edited in the scene.\n"
+        "The referenced faces are saved directly in the file (.itgraph) so they are remembered when reopening."
     )
     header_color = (94, 129, 172)
 
     inputs = [
         InputSpec("name", "Name", SocketType.STRING, default="Referenced_Face"),
+        InputSpec("live_sync", "Live Tracking", SocketType.BOOL, default=True),
     ]
     outputs = [
         OutputSpec("surfaces", "Surfaces", SocketType.ANY),
@@ -42,6 +43,11 @@ class ReferenceFaceNode(BaseNode):
         OutputSpec("count", "Face Count", SocketType.INT),
     ]
 
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._live_targets: Optional[List[Any]] = None
+        self._app_ref: Any = None
+
     def get_action_buttons(self) -> List[Dict[str, Any]]:
         return [
             {
@@ -50,6 +56,13 @@ class ReferenceFaceNode(BaseNode):
                 "tooltip": "Store currently selected face(s) from IngeTrazo 3D viewport",
                 "color": "#2b5278",
                 "action": "set_face",
+            },
+            {
+                "id": "btn_sync_face",
+                "label": "🔄 Update from Scene",
+                "tooltip": "Re-read live positions of referenced face(s) from scene",
+                "color": "#3b6e50",
+                "action": "sync_face",
             },
             {
                 "id": "btn_clear_face",
@@ -67,28 +80,35 @@ class ReferenceFaceNode(BaseNode):
             if stored_single and isinstance(stored_single, dict) and "outer" in stored_single:
                 stored_faces = [stored_single]
 
+        is_live = bool(getattr(self, "_live_targets", None))
+        prefix = "🔗 Live" if is_live else "📌 Stored"
+
         if stored_faces:
             n_faces = len(stored_faces)
             if n_faces > 1:
                 total_pts = sum(len(f.get("outer", [])) for f in stored_faces)
-                return f"📌 Stored: {n_faces} faces ({total_pts} pts)"
+                return f"{prefix}: {n_faces} faces ({total_pts} pts)"
             n_outer = len(stored_faces[0].get("outer", []))
             n_holes = len(stored_faces[0].get("holes", []))
             if n_holes > 0:
-                return f"📌 Stored: {n_outer} pts ({n_holes} hole{'s' if n_holes > 1 else ''})"
-            return f"📌 Stored: {n_outer} pts"
+                return f"{prefix}: {n_outer} pts ({n_holes} hole{'s' if n_holes > 1 else ''})"
+            return f"{prefix}: {n_outer} pts"
         return "⚪ No face referenced"
 
     @staticmethod
-    def _to_vec3(p: Any) -> Optional[Vec3]:
-        """Convert any IngeTrazo Vertex, QVector3D, or coordinate tuple to Vec3."""
+    def _to_vec3(p: Any, xform: Optional[Any] = None) -> Optional[Vec3]:
+        """Convert any IngeTrazo Vertex, QVector3D, or coordinate tuple to Vec3, applying optional xform."""
         if p is None:
             return None
+        if hasattr(p, "position"):
+            p = p.position
+        if xform is not None and hasattr(xform, "map"):
+            try:
+                p = xform.map(p)
+            except Exception:
+                pass
         if isinstance(p, Vec3):
             return p
-        if hasattr(p, "position"):
-            pos = p.position
-            return Vec3(float(pos.x()), float(pos.y()), float(pos.z()))
         if hasattr(p, "x"):
             x = float(p.x() if callable(p.x) else p.x)
             y = float(p.y() if callable(p.y) else p.y)
@@ -99,12 +119,11 @@ class ReferenceFaceNode(BaseNode):
         return None
 
     @classmethod
-    def _extract_face_loops(cls, f: Any) -> Tuple[List[Vec3], List[List[Vec3]]]:
-        """Extract outer vertices and holes from an IngeTrazo Face object."""
+    def _extract_face_loops(cls, f: Any, xform: Optional[Any] = None) -> Tuple[List[Vec3], List[List[Vec3]]]:
+        """Extract outer vertices and holes from an IngeTrazo Face object, with optional transform mapping."""
         outer: List[Vec3] = []
         holes: List[List[Vec3]] = []
 
-        # 1. Outer boundary
         raw_verts = getattr(f, "vertices", None)
         if raw_verts is None:
             raw_loop = getattr(f, "loop", None)
@@ -112,22 +131,82 @@ class ReferenceFaceNode(BaseNode):
 
         if raw_verts:
             for v in raw_verts:
-                pt = cls._to_vec3(v)
+                pt = cls._to_vec3(v, xform)
                 if pt:
                     outer.append(pt)
 
-        # 2. Native holes
-        raw_holes = getattr(f, "holes", None) or []
+        raw_holes = getattr(f, "holes", None) or getattr(f, "hole_loops", None) or []
         for h_ring in raw_holes:
             h_pts: List[Vec3] = []
             for hv in h_ring:
-                pt = cls._to_vec3(hv)
+                pt = cls._to_vec3(hv, xform)
                 if pt:
                     h_pts.append(pt)
             if len(h_pts) >= 3:
                 holes.append(h_pts)
 
         return outer, holes
+
+    def _extract_faces_from_targets(self, targets: List[Any], scene: Any = None) -> List[Tuple[List[Vec3], List[List[Vec3]]]]:
+        collected_faces: List[Tuple[List[Vec3], List[List[Vec3]]]] = []
+        for target in targets:
+            item = target
+            xform = None
+            if isinstance(target, tuple) and len(target) == 2:
+                item, grp = target
+                xform = getattr(grp, "xform", None)
+            else:
+                xform = getattr(item, "xform", None)
+
+            if hasattr(item, "vertices") or hasattr(item, "loop"):
+                o, h = self._extract_face_loops(item, xform)
+                if len(o) >= 3:
+                    collected_faces.append((o, h))
+            elif hasattr(item, "mesh") and hasattr(item.mesh, "faces"):
+                for gf in item.mesh.faces:
+                    o, h = self._extract_face_loops(gf, xform)
+                    if len(o) >= 3:
+                        collected_faces.append((o, h))
+        return collected_faces
+
+    def _update_from_targets(self, targets: List[Any], scene: Any = None) -> bool:
+        collected_faces = self._extract_faces_from_targets(targets, scene)
+        if not collected_faces:
+            return False
+
+        faces_data: List[Dict[str, Any]] = []
+        for outer, holes in collected_faces:
+            faces_data.append({
+                "outer": [(p.x, p.y, p.z) for p in outer],
+                "holes": [[(p.x, p.y, p.z) for p in h] for h in holes],
+                "base_z": outer[0].z if outer else 0.0,
+            })
+
+        old_data = self.param_values.get("stored_faces")
+        if old_data == faces_data:
+            return False
+
+        self.param_values["stored_faces"] = faces_data
+        self.param_values["stored_face"] = faces_data[0]
+        self.is_dirty = True
+        return True
+
+    def sync_from_scene(self, app: Any = None) -> bool:
+        """Re-reads live coordinates from the referenced scene face(s). Returns True if changed."""
+        targets = getattr(self, "_live_targets", None)
+        if not targets:
+            return False
+        app = app or getattr(self, "_app_ref", None)
+        if app is None:
+            try:
+                from PySide6.QtWidgets import QApplication
+                qapp = QApplication.instance()
+                app = getattr(qapp, "_extension_app_handle", None)
+            except Exception:
+                app = None
+        viewport = getattr(app, "viewport", None) if app else None
+        scene = getattr(viewport, "scene", None) or getattr(app, "scene", None) if app else None
+        return self._update_from_targets(targets, scene)
 
     def reference_from_selection(self, app: Any = None) -> Tuple[str, bool]:
         """Extract all selected faces from the active IngeTrazo viewport and save into param_values."""
@@ -155,53 +234,50 @@ class ReferenceFaceNode(BaseNode):
         if not sel:
             return ("Please select face(s) in IngeTrazo first!", False)
 
-        collected_faces: List[Tuple[List[Vec3], List[List[Vec3]]]] = []
-
+        collected_targets: List[Any] = []
         for item in sel:
             if hasattr(item, "vertices") or hasattr(item, "loop"):
-                o, h = self._extract_face_loops(item)
-                if len(o) >= 3:
-                    collected_faces.append((o, h))
+                collected_targets.append(item)
             elif hasattr(item, "mesh") and hasattr(item.mesh, "faces"):
                 for gf in item.mesh.faces:
-                    o, h = self._extract_face_loops(gf)
-                    if len(o) >= 3:
-                        collected_faces.append((o, h))
+                    collected_targets.append((gf, item))
 
-        if not collected_faces:
+        if not collected_targets:
             return ("Selected item has no planar faces", False)
 
-        faces_data: List[Dict[str, Any]] = []
-        for outer, holes in collected_faces:
-            faces_data.append({
-                "outer": [(p.x, p.y, p.z) for p in outer],
-                "holes": [[(p.x, p.y, p.z) for p in h] for h in holes],
-                "base_z": outer[0].z if outer else 0.0,
-            })
+        self._live_targets = collected_targets
+        self._app_ref = app
+        self._update_from_targets(collected_targets, scene)
 
-        self.param_values["stored_faces"] = faces_data
-        self.param_values["stored_face"] = faces_data[0]
-        self.is_dirty = True
-
+        faces_data = self.param_values.get("stored_faces", [])
         if len(faces_data) > 1:
             total_pts = sum(len(f["outer"]) for f in faces_data)
-            summary_txt = f"{len(faces_data)} faces ({total_pts} pts)"
+            summary_txt = f"{len(faces_data)} faces ({total_pts} pts) [Live Linked]"
         else:
             outer = faces_data[0]["outer"]
             holes = faces_data[0]["holes"]
-            summary_txt = f"{len(outer)} pts" + (f", {len(holes)} hole(s)" if holes else "")
+            summary_txt = f"{len(outer)} pts" + (f", {len(holes)} hole(s)" if holes else "") + " [Live Linked]"
 
         return (f"Saved: {summary_txt}", True)
 
     def clear_reference(self) -> None:
-        """Clear stored referenced faces."""
+        """Clear stored referenced faces and live link."""
+        self._live_targets = None
         if "stored_faces" in self.param_values:
             del self.param_values["stored_faces"]
         if "stored_face" in self.param_values:
             del self.param_values["stored_face"]
         self.is_dirty = True
 
-    def compute(self, name: str = "Referenced_Face") -> Dict[str, Any]:
+    def compute(
+        self,
+        name: str = "Referenced_Face",
+        live_sync: bool = True,
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
+        if live_sync and getattr(self, "_live_targets", None):
+            self.sync_from_scene()
+
         stored_faces = self.param_values.get("stored_faces")
         if not stored_faces:
             s = self.param_values.get("stored_face")
@@ -285,12 +361,14 @@ class SelectCurveNode(BaseNode):
         "Select or reference existing curve(s) or polylines from the IngeTrazo 3D viewport into the node graph.\n"
         "Supports selecting multiple curves at once.\n"
         "Click '📌 Set Selected Curve(s)' to store the active viewport selection.\n"
+        "Live tracking automatically keeps curves in sync when moved or edited in the scene.\n"
         "Outputs referenced curves, ordered points, total curve length, and closed state."
     )
     header_color = (94, 129, 172)
 
     inputs = [
         InputSpec("name", "Name", SocketType.STRING, default="Referenced_Curves"),
+        InputSpec("live_sync", "Live Tracking", SocketType.BOOL, default=True),
     ]
     outputs = [
         OutputSpec("curves", "Curves", SocketType.ANY),
@@ -301,6 +379,11 @@ class SelectCurveNode(BaseNode):
         OutputSpec("count", "Curve Count", SocketType.INT),
     ]
 
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._live_targets: Optional[List[Any]] = None
+        self._app_ref: Any = None
+
     def get_action_buttons(self) -> List[Dict[str, Any]]:
         return [
             {
@@ -309,6 +392,13 @@ class SelectCurveNode(BaseNode):
                 "tooltip": "Store currently selected curve(s) or edges from IngeTrazo 3D viewport",
                 "color": "#2b5278",
                 "action": "set_curve",
+            },
+            {
+                "id": "btn_sync_curve",
+                "label": "🔄 Update from Scene",
+                "tooltip": "Re-read live positions of referenced curve(s) from scene",
+                "color": "#3b6e50",
+                "action": "sync_curve",
             },
             {
                 "id": "btn_clear_curve",
@@ -326,24 +416,31 @@ class SelectCurveNode(BaseNode):
             if stored_single and isinstance(stored_single, dict) and "points" in stored_single:
                 stored_list = [stored_single]
 
+        is_live = bool(getattr(self, "_live_targets", None))
+        prefix = "🔗 Live" if is_live else "📌 Stored"
+
         if stored_list:
             n_curves = len(stored_list)
             total_pts = sum(len(c.get("points", [])) for c in stored_list)
             if n_curves > 1:
-                return f"📌 Stored: {n_curves} curves ({total_pts} pts)"
+                return f"{prefix}: {n_curves} curves ({total_pts} pts)"
             cls_txt = "Closed" if stored_list[0].get("closed", False) else "Open"
-            return f"📌 Stored: {total_pts} pts ({cls_txt})"
+            return f"{prefix}: {total_pts} pts ({cls_txt})"
         return "⚪ No curve referenced"
 
     @staticmethod
-    def _to_vec3(p: Any) -> Optional[Vec3]:
+    def _to_vec3(p: Any, xform: Optional[Any] = None) -> Optional[Vec3]:
         if p is None:
             return None
+        if hasattr(p, "position"):
+            p = p.position
+        if xform is not None and hasattr(xform, "map"):
+            try:
+                p = xform.map(p)
+            except Exception:
+                pass
         if isinstance(p, Vec3):
             return p
-        if hasattr(p, "position"):
-            pos = p.position
-            return Vec3(float(pos.x()), float(pos.y()), float(pos.z()))
         if hasattr(p, "x"):
             x = float(p.x() if callable(p.x) else p.x)
             y = float(p.y() if callable(p.y) else p.y)
@@ -432,8 +529,121 @@ class SelectCurveNode(BaseNode):
 
         return curves
 
+    def _extract_curves_from_items(self, targets: List[Any], scene: Any = None) -> List[CurveData]:
+        raw_segments: List[Tuple[Vec3, Vec3]] = []
+        collected_curves: List[CurveData] = []
+        seen_curves = set()
+
+        mesh = getattr(scene, "mesh", None) if scene else None
+
+        for target in targets:
+            group = None
+            item = target
+            if isinstance(target, tuple) and len(target) == 2:
+                item, group = target
+
+            xform = getattr(group, "xform", None) if group else getattr(item, "xform", None)
+
+            # 1. Group object itself with edges
+            if hasattr(item, "mesh") and hasattr(item.mesh, "edges") and not hasattr(item, "v0"):
+                g_mesh = item.mesh
+                g_xform = getattr(item, "xform", None)
+                for ge in getattr(g_mesh, "edges", []):
+                    p0 = self._to_vec3(ge.v0, g_xform)
+                    p1 = self._to_vec3(ge.v1, g_xform)
+                    if p0 and p1:
+                        raw_segments.append((p0, p1))
+                continue
+
+            # 2. Whole Curve objects with points
+            if hasattr(item, "points") and len(item.points) >= 2:
+                pts = [self._to_vec3(p, xform) for p in item.points]
+                pts = [p for p in pts if p is not None]
+                if len(pts) >= 2:
+                    cls_flag = bool(getattr(item, "closed", getattr(item, "is_closed", False)))
+                    collected_curves.append(CurveData(points=pts, closed=cls_flag))
+                    continue
+
+            # 3. Edges with incident curve
+            if hasattr(item, "v0") and hasattr(item, "v1"):
+                c_parent = getattr(item, "curve", None)
+                cur_mesh = getattr(group, "mesh", None) if group else mesh
+                if c_parent is not None and cur_mesh and hasattr(cur_mesh, "curve_edges") and c_parent not in seen_curves:
+                    seen_curves.add(c_parent)
+                    try:
+                        c_edges = cur_mesh.curve_edges(c_parent)
+                        for ce in c_edges:
+                            p0 = self._to_vec3(ce.v0, xform)
+                            p1 = self._to_vec3(ce.v1, xform)
+                            if p0 and p1:
+                                raw_segments.append((p0, p1))
+                        continue
+                    except Exception:
+                        pass
+
+                p0 = self._to_vec3(item.v0, xform)
+                p1 = self._to_vec3(item.v1, xform)
+                if p0 and p1:
+                    raw_segments.append((p0, p1))
+
+            # 4. Face object (boundary)
+            elif hasattr(item, "vertices") or hasattr(item, "loop"):
+                raw_loop = getattr(item, "loop", None)
+                if not raw_loop and hasattr(item, "vertices"):
+                    raw_loop = item.vertices
+                if raw_loop:
+                    pts = [self._to_vec3(v, xform) for v in raw_loop]
+                    pts = [p for p in pts if p is not None]
+                    if len(pts) >= 3:
+                        collected_curves.append(CurveData(points=pts, closed=True))
+
+        if raw_segments:
+            chained = self._chain_segments_into_curves(raw_segments)
+            collected_curves.extend(chained)
+
+        return collected_curves
+
+    def _update_from_targets(self, targets: List[Any], scene: Any = None) -> bool:
+        new_curves = self._extract_curves_from_items(targets, scene=scene)
+        if not new_curves:
+            return False
+
+        stored_curves_data: List[Dict[str, Any]] = []
+        for c in new_curves:
+            stored_curves_data.append({
+                "points": [(p.x, p.y, p.z) for p in c.points],
+                "closed": bool(c.closed),
+                "length": float(c.length()),
+            })
+
+        old_data = self.param_values.get("stored_curves")
+        if old_data == stored_curves_data:
+            return False
+
+        self.param_values["stored_curves"] = stored_curves_data
+        self.param_values["stored_curve"] = stored_curves_data[0]
+        self.is_dirty = True
+        return True
+
+    def sync_from_scene(self, app: Any = None) -> bool:
+        """Re-reads live coordinates from the referenced scene curve/edges. Returns True if changed."""
+        targets = getattr(self, "_live_targets", None)
+        if not targets:
+            return False
+        app = app or getattr(self, "_app_ref", None)
+        if app is None:
+            try:
+                from PySide6.QtWidgets import QApplication
+                qapp = QApplication.instance()
+                app = getattr(qapp, "_extension_app_handle", None)
+            except Exception:
+                app = None
+        viewport = getattr(app, "viewport", None) if app else None
+        scene = getattr(viewport, "scene", None) or getattr(app, "scene", None) if app else None
+        return self._update_from_targets(targets, scene)
+
     def reference_from_selection(self, app: Any = None) -> Tuple[str, bool]:
-        """Extract all selected curves or edges from IngeTrazo viewport."""
+        """Extract all selected curves or edges from IngeTrazo viewport and store live references."""
         if app is None:
             try:
                 from PySide6.QtWidgets import QApplication
@@ -464,81 +674,57 @@ class SelectCurveNode(BaseNode):
         if not combined_sel:
             return ("Please select curve(s) or edges in IngeTrazo first!", False)
 
-        raw_segments: List[Tuple[Vec3, Vec3]] = []
-        collected_curves: List[CurveData] = []
-        seen_curves = set()
-
-        mesh = getattr(scene, "mesh", None)
-
+        collected_targets: List[Any] = []
         for item in combined_sel:
-            # 1. Whole Curve objects
-            if hasattr(item, "points") and len(item.points) >= 2:
-                pts = [self._to_vec3(p) for p in item.points]
-                pts = [p for p in pts if p is not None]
-                if len(pts) >= 2:
-                    cls_flag = bool(getattr(item, "closed", getattr(item, "is_closed", False)))
-                    collected_curves.append(CurveData(points=pts, closed=cls_flag))
-                    continue
+            if hasattr(item, "mesh") and hasattr(item.mesh, "edges") and not hasattr(item, "v0"):
+                for ge in getattr(item.mesh, "edges", []):
+                    collected_targets.append((ge, item))
+            elif hasattr(item, "v0") and hasattr(item, "v1"):
+                collected_targets.append(item)
+            elif hasattr(item, "points"):
+                collected_targets.append(item)
+            elif hasattr(item, "loop") or hasattr(item, "vertices"):
+                collected_targets.append(item)
 
-            # 2. Edges with a parent curve
-            if hasattr(item, "v0") and hasattr(item, "v1"):
-                c_parent = getattr(item, "curve", None)
-                if c_parent is not None and mesh and hasattr(mesh, "curve_edges") and c_parent not in seen_curves:
-                    seen_curves.add(c_parent)
-                    try:
-                        c_edges = mesh.curve_edges(c_parent)
-                        for ce in c_edges:
-                            p0 = self._to_vec3(ce.v0)
-                            p1 = self._to_vec3(ce.v1)
-                            if p0 and p1:
-                                raw_segments.append((p0, p1))
-                        continue
-                    except Exception:
-                        pass
-
-                p0 = self._to_vec3(item.v0)
-                p1 = self._to_vec3(item.v1)
-                if p0 and p1:
-                    raw_segments.append((p0, p1))
-
-        if raw_segments:
-            chained = self._chain_segments_into_curves(raw_segments)
-            collected_curves.extend(chained)
-
-        if not collected_curves:
+        if not collected_targets:
             return ("No valid curve or edge geometry found in selection", False)
 
-        stored_curves_data: List[Dict[str, Any]] = []
-        for c in collected_curves:
-            stored_curves_data.append({
-                "points": [(p.x, p.y, p.z) for p in c.points],
-                "closed": bool(c.closed),
-                "length": float(c.length()),
-            })
+        self._live_targets = collected_targets
+        self._app_ref = app
 
-        self.param_values["stored_curves"] = stored_curves_data
-        self.param_values["stored_curve"] = stored_curves_data[0]
-        self.is_dirty = True
+        ok = self._update_from_targets(collected_targets, scene)
+        if not ok:
+            return ("Could not extract valid curve geometry from selection", False)
 
+        stored_curves_data = self.param_values.get("stored_curves", [])
         n_c = len(stored_curves_data)
         total_pts = sum(len(c["points"]) for c in stored_curves_data)
         if n_c > 1:
-            summary_txt = f"{n_c} curves ({total_pts} pts)"
+            summary_txt = f"{n_c} curves ({total_pts} pts) [Live Linked]"
         else:
             cls_txt = "Closed" if stored_curves_data[0]["closed"] else "Open"
-            summary_txt = f"{total_pts} pts ({cls_txt})"
+            summary_txt = f"{total_pts} pts ({cls_txt}) [Live Linked]"
 
         return (f"Saved: {summary_txt}", True)
 
     def clear_reference(self) -> None:
-        """Clear stored referenced curves."""
+        """Clear stored referenced curves and live references."""
+        self._live_targets = None
         if "stored_curves" in self.param_values:
             del self.param_values["stored_curves"]
         if "stored_curve" in self.param_values:
             del self.param_values["stored_curve"]
         self.is_dirty = True
 
-    def compute(self, name: str = "Referenced_Curves") -> Dict[str, Any]:
+    def compute(
+        self,
+        name: str = "Referenced_Curves",
+        live_sync: bool = True,
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
+        if live_sync and getattr(self, "_live_targets", None):
+            self.sync_from_scene()
+
         stored_list = self.param_values.get("stored_curves")
         if not stored_list:
             stored_single = self.param_values.get("stored_curve")
@@ -587,10 +773,6 @@ class SelectCurveNode(BaseNode):
 NODE_REGISTRY["curve.select"] = SelectCurveNode
 
 
-
-# ============================================================================
-# 3. Preview Node (Scene Output Tab)
-# ============================================================================
 @register_node
 class PreviewNode(BaseNode):
     type_id = "scene.preview"

@@ -6,11 +6,11 @@ import math
 from typing import Any, Dict, List, Tuple
 
 try:
-    from ..core_types import AccessMode, CurveData, MeshData, SocketType, Vec3
-    from ..node_base import BaseNode, InputSpec, OutputSpec, register_node
+    from ..core_types import AccessMode, CurveData, MeshData, SocketType, Vec3, extract_plane_frame
+    from ..node_base import BaseNode, InputSpec, OutputSpec, register_node, NODE_REGISTRY
 except (ImportError, ValueError):
-    from core_types import AccessMode, CurveData, MeshData, SocketType, Vec3
-    from node_base import BaseNode, InputSpec, OutputSpec, register_node
+    from core_types import AccessMode, CurveData, MeshData, SocketType, Vec3, extract_plane_frame
+    from node_base import BaseNode, InputSpec, OutputSpec, register_node, NODE_REGISTRY
 
 
 # ============================================================================
@@ -354,7 +354,8 @@ class SweepNode(BaseNode):
     description = (
         "Sweeps a 2D/3D profile curve along a rail trajectory path using rotation-minimizing\n"
         "parallel transport frames to produce a smooth watertight solid or tubular surface.\n"
-        "Supports open or closed profiles and paths, with automatic start and end capping."
+        "Supports angle-bisector mitered corners (Follow Me parity), open or closed profiles and paths,\n"
+        "and automatic start and end capping with outward face normals."
     )
     header_color = (155, 89, 182)
 
@@ -362,13 +363,253 @@ class SweepNode(BaseNode):
         InputSpec("profile", "Profile Curve", SocketType.CURVE, default=None, hide_widget=True),
         InputSpec("rail", "Rail Path", SocketType.CURVE, default=None, hide_widget=True),
         InputSpec("capped", "Cap Ends", SocketType.BOOL, default=True),
+        InputSpec("miter", "Miter Corners", SocketType.BOOL, default=True),
+        InputSpec("flip_z", "Flip Upright", SocketType.BOOL, default=False),
         InputSpec("scale_end", "Scale End", SocketType.FLOAT, default=1.0, min_val=0.01, max_val=10.0, step=0.1),
     ]
     outputs = [
         OutputSpec("solid", "Sweep Solid", SocketType.MESH),
     ]
 
-    def compute(self, profile: Any = None, rail: Any = None, capped: bool = True, scale_end: float = 1.0) -> Dict[str, Any]:
+    @staticmethod
+    def _newell_normal(pts: List[Vec3]) -> Vec3:
+        if len(pts) < 3:
+            return Vec3(0, 0, 1)
+        nx, ny, nz = 0.0, 0.0, 0.0
+        n = len(pts)
+        for i in range(n):
+            p0 = pts[i]
+            p1 = pts[(i + 1) % n]
+            nx += (p0.y - p1.y) * (p0.z + p1.z)
+            ny += (p0.z - p1.z) * (p0.x + p1.x)
+            nz += (p0.x - p1.x) * (p0.y + p1.y)
+        v = Vec3(nx, ny, nz)
+        return v.normalized() if v.length() > 1e-6 else Vec3(0, 0, 1)
+
+    def _sweep_single_rail(
+        self,
+        profile: CurveData,
+        rail: CurveData,
+        capped: bool = True,
+        miter: bool = True,
+        flip_z: bool = False,
+        scale_end: float = 1.0,
+    ) -> MeshData:
+        pts_rail = list(rail.points)
+        if len(pts_rail) < 2:
+            return MeshData(name="Sweep_Solid")
+
+        # Filter out consecutive duplicate points along rail
+        clean_rail: List[Vec3] = [pts_rail[0]]
+        for p in pts_rail[1:]:
+            if p.distance_to(clean_rail[-1]) > 1e-5:
+                clean_rail.append(p)
+        pts_rail = clean_rail
+        k_count = len(pts_rail)
+        if k_count < 2:
+            return MeshData(name="Sweep_Solid")
+
+        # Check if rail is closed
+        is_rail_closed = bool(getattr(rail, "closed", False))
+        if k_count > 2 and pts_rail[0].distance_to(pts_rail[-1]) < 0.01:
+            is_rail_closed = True
+            pts_rail = pts_rail[:-1]
+            k_count = len(pts_rail)
+
+        # Clean profile points
+        prof_pts = list(profile.points)
+        clean_prof: List[Vec3] = [prof_pts[0]]
+        for p in prof_pts[1:]:
+            if p.distance_to(clean_prof[-1]) > 1e-5:
+                clean_prof.append(p)
+        if profile.closed and len(clean_prof) > 2 and clean_prof[0].distance_to(clean_prof[-1]) < 0.01:
+            clean_prof = clean_prof[:-1]
+        prof_pts = clean_prof
+        m_count = len(prof_pts)
+        if m_count < 2:
+            return MeshData(name="Sweep_Solid")
+
+        # 1. Segment tangents along rail
+        seg_tangents: List[Vec3] = []
+        seg_count = k_count if is_rail_closed else k_count - 1
+        for i in range(seg_count):
+            nxt = (i + 1) % k_count
+            t = (pts_rail[nxt] - pts_rail[i]).normalized()
+            seg_tangents.append(t if t.length() > 1e-6 else Vec3(1, 0, 0))
+
+        t0 = seg_tangents[0]
+
+        # 2. Check profile orientation (3D oriented near rail start vs 2D local)
+        c_prof = Vec3(
+            sum(p.x for p in prof_pts) / m_count,
+            sum(p.y for p in prof_pts) / m_count,
+            sum(p.z for p in prof_pts) / m_count,
+        )
+        n_prof = self._newell_normal(prof_pts)
+        p0 = pts_rail[0]
+        min_dist_to_p0 = min(p.distance_to(p0) for p in prof_pts)
+
+        is_3d_oriented = (min_dist_to_p0 < 0.5) and (abs(n_prof.dot(t0)) > 0.7)
+
+        if is_3d_oriented:
+            closest_p = min(prof_pts, key=lambda pt: pt.distance_to(p0))
+            anchor = p0 if closest_p.distance_to(p0) < 0.2 else closest_p
+            offsets_0 = [p - anchor for p in prof_pts]
+        else:
+            # 2D parametric profile in XY plane - build natural upright right-handed frame
+            if abs(t0.z) < 0.99:
+                up = Vec3(0, 0, 1)
+                prof_x0 = up.cross(t0).normalized()       # Horizontal cross-width
+                prof_y0 = t0.cross(prof_x0).normalized()  # Upright vertical height
+            else:
+                guide = Vec3(0, 1, 0) if t0.z > 0 else Vec3(0, -1, 0)
+                prof_x0 = guide.cross(t0).normalized()
+                prof_y0 = t0.cross(prof_x0).normalized()
+            y_mult = -1.0 if flip_z else 1.0
+            offsets_0 = [prof_x0 * p.x + prof_y0 * (p.y * y_mult) + t0 * p.z for p in prof_pts]
+
+        # 3. Parallel transport & miter along rail
+        # Corner 0 miter when rail is closed (Follow Me parity: seamless closed loop)
+        if miter and is_rail_closed and len(seg_tangents) >= 2:
+            t_in_0 = seg_tangents[-1]
+            t_out_0 = seg_tangents[0]
+            t_bisect_0 = (t_in_0 + t_out_0).normalized()
+            denom_0 = t_out_0.dot(t_bisect_0)
+            if denom_0 > 1e-4:
+                denom_0 = max(0.25, denom_0)  # Clamp miter spike on sharp hairpin turns
+                mitered_0 = [off - t_out_0 * (off.dot(t_bisect_0) / denom_0) for off in offsets_0]
+                station_offsets: List[List[Vec3]] = [mitered_0]
+            else:
+                station_offsets = [offsets_0]
+        else:
+            station_offsets = [offsets_0]
+
+        curr_offsets = list(offsets_0)
+
+        for i in range(1, k_count):
+            t_prev = seg_tangents[i - 1]
+            t_curr = seg_tangents[i if i < len(seg_tangents) else -1]
+            p_prev = pts_rail[i - 1]
+            p_curr = pts_rail[i]
+
+            # Double reflection from segment i-1 to segment i
+            v1 = p_curr - p_prev
+            c1 = v1.dot(v1)
+            next_offsets: List[Vec3] = []
+            for off in curr_offsets:
+                if c1 > 1e-12:
+                    r_l_t = t_prev - v1 * ((2.0 / c1) * v1.dot(t_prev))
+                    r_l_n = off - v1 * ((2.0 / c1) * v1.dot(off))
+                    v2 = t_curr - r_l_t
+                    c2 = v2.dot(v2)
+                    if c2 > 1e-12:
+                        off_next = r_l_n - v2 * ((2.0 / c2) * v2.dot(r_l_n))
+                    else:
+                        off_next = r_l_n
+                else:
+                    off_next = off
+                next_offsets.append(off_next)
+            curr_offsets = next_offsets
+
+            # Apply angle-bisector miter at corner (Follow Me parity)
+            if miter and (i < k_count - 1 or is_rail_closed):
+                t_in = seg_tangents[i - 1]
+                t_out = seg_tangents[i if i < len(seg_tangents) else -1]
+                t_bisect = (t_in + t_out).normalized()
+                denom = t_out.dot(t_bisect)
+                if denom > 1e-4:
+                    denom = max(0.25, denom)  # Clamp miter spike on sharp hairpin turns
+                    mitered = [off - t_out * (off.dot(t_bisect) / denom) for off in curr_offsets]
+                    station_offsets.append(mitered)
+                else:
+                    station_offsets.append(curr_offsets)
+            else:
+                station_offsets.append(curr_offsets)
+
+        # 4. Generate mesh vertices
+        mesh_verts: List[Tuple[float, float, float]] = []
+        s_end = float(scale_end)
+        for i in range(k_count):
+            origin = pts_rail[i]
+            scale = 1.0 if is_rail_closed else (1.0 + (s_end - 1.0) * (i / float(k_count - 1)))
+            for off in station_offsets[i]:
+                pos = origin + off * scale
+                mesh_verts.append((pos.x, pos.y, pos.z))
+
+        # 5. Outward CCW Quad faces connecting consecutive stations
+        mesh_faces: List[List[int]] = []
+        mesh_edges_set = set()
+
+        def _add_edge(a: int, b: int) -> None:
+            mesh_edges_set.add((min(a, b), max(a, b)))
+
+        station_rings = k_count if is_rail_closed else k_count - 1
+        prof_segs = m_count if profile.closed else m_count - 1
+
+        for i in range(station_rings):
+            nxt_i = (i + 1) % k_count
+            base_a = i * m_count
+            base_b = nxt_i * m_count
+            for j in range(prof_segs):
+                nxt_j = (j + 1) % m_count
+                i00 = base_a + j
+                i01 = base_a + nxt_j
+                i11 = base_b + nxt_j
+                i10 = base_b + j
+                # Standard CCW outward face (adjust winding if upright flipped)
+                if flip_z:
+                    mesh_faces.append([i00, i10, i11, i01])
+                else:
+                    mesh_faces.append([i00, i01, i11, i10])
+                _add_edge(i00, i01)
+                _add_edge(i01, i11)
+                _add_edge(i11, i10)
+                _add_edge(i10, i00)
+
+        # 6. End Capping (only for open rails with closed profile)
+        if capped and profile.closed and not is_rail_closed and m_count >= 3:
+            # Start cap (must face backward: -t0)
+            c0_pts = [Vec3(*mesh_verts[j]) for j in range(m_count)]
+            n_cap0 = self._newell_normal(c0_pts)
+            if n_cap0.dot(t0) > 0:
+                start_cap = list(reversed(range(0, m_count)))
+            else:
+                start_cap = list(range(0, m_count))
+
+            # End cap (must face forward: +t_end)
+            t_end = seg_tangents[-1]
+            end_base = (k_count - 1) * m_count
+            c_end_pts = [Vec3(*mesh_verts[end_base + j]) for j in range(m_count)]
+            n_cap_end = self._newell_normal(c_end_pts)
+            if n_cap_end.dot(t_end) < 0:
+                end_cap = list(reversed(range(end_base, end_base + m_count)))
+            else:
+                end_cap = list(range(end_base, end_base + m_count))
+
+            mesh_faces.insert(0, start_cap)
+            mesh_faces.append(end_cap)
+
+        return MeshData(
+            vertices=mesh_verts,
+            faces=mesh_faces,
+            edges=list(mesh_edges_set),
+            name="Sweep_Solid",
+        )
+
+    def compute(
+        self,
+        profile: Any = None,
+        rail: Any = None,
+        capped: bool = True,
+        miter: bool = True,
+        flip_z: bool = False,
+        scale_end: float = 1.0,
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
+        # Handle list unwrapping if profile was passed as single-element list
+        if isinstance(profile, (list, tuple)) and profile:
+            profile = profile[0]
+
         # Fallback profile: 0.3m radius 12-segment circle
         if not isinstance(profile, CurveData) or len(profile.points) < 3:
             prof_pts: List[Vec3] = []
@@ -377,8 +618,17 @@ class SweepNode(BaseNode):
                 prof_pts.append(Vec3(0.3 * math.cos(ang), 0.3 * math.sin(ang), 0.0))
             profile = CurveData(points=prof_pts, closed=True)
 
+        # Collect rail curve(s)
+        rail_curves: List[CurveData] = []
+        if isinstance(rail, (list, tuple)):
+            for r in rail:
+                if isinstance(r, CurveData) and len(r.points) >= 2:
+                    rail_curves.append(r)
+        elif isinstance(rail, CurveData) and len(rail.points) >= 2:
+            rail_curves.append(rail)
+
         # Fallback rail: curved trajectory
-        if not isinstance(rail, CurveData) or len(rail.points) < 2:
+        if not rail_curves:
             rail_pts: List[Vec3] = [
                 Vec3(0.0, 0.0, 0.0),
                 Vec3(1.5, 0.5, 1.0),
@@ -386,124 +636,28 @@ class SweepNode(BaseNode):
                 Vec3(4.5, 1.2, 4.0),
                 Vec3(6.0, 0.0, 5.0),
             ]
-            rail = CurveData(points=rail_pts, closed=False)
+            rail_curves = [CurveData(points=rail_pts, closed=False)]
 
-        pts_rail = rail.points
-        k_count = len(pts_rail)
-        if k_count < 2:
-            return {"solid": MeshData(name="Sweep_Solid")}
-
-        # 1. Compute tangents along rail
-        tangents: List[Vec3] = []
-        for i in range(k_count):
-            if i == 0:
-                t = (pts_rail[1] - pts_rail[0]).normalized()
-            elif i == k_count - 1:
-                t = (pts_rail[k_count - 1] - pts_rail[k_count - 2]).normalized()
-            else:
-                t = (pts_rail[i + 1] - pts_rail[i - 1]).normalized()
-            tangents.append(t if t.length() > 1e-6 else Vec3(0, 0, 1))
-
-        # 2. Parallel Transport Frame (Double Reflection Method / Wang et al.)
-        normals: List[Vec3] = []
-        binormals: List[Vec3] = []
-
-        # Initial frame at k=0
-        t0 = tangents[0]
-        guide = Vec3(0, 0, 1) if abs(t0.z) < 0.9 else Vec3(1, 0, 0)
-        n0 = t0.cross(guide).normalized()
-        b0 = t0.cross(n0).normalized()
-        normals.append(n0)
-        binormals.append(b0)
-
-        for i in range(1, k_count):
-            p_prev = pts_rail[i - 1]
-            p_curr = pts_rail[i]
-            v1 = p_curr - p_prev
-            c1 = v1.dot(v1)
-
-            t_prev = tangents[i - 1]
-            t_curr = tangents[i]
-            n_prev = normals[i - 1]
-
-            if c1 > 1e-12:
-                # First reflection across bisecting plane of p_curr - p_prev
-                r_l_t = t_prev - v1 * ((2.0 / c1) * v1.dot(t_prev))
-                r_l_n = n_prev - v1 * ((2.0 / c1) * v1.dot(n_prev))
-
-                # Second reflection across bisecting plane of t_curr - r_l_t
-                v2 = t_curr - r_l_t
-                c2 = v2.dot(v2)
-                if c2 > 1e-12:
-                    n_curr = (r_l_n - v2 * ((2.0 / c2) * v2.dot(r_l_n))).normalized()
-                else:
-                    n_curr = r_l_n.normalized()
-            else:
-                n_curr = n_prev
-
-            b_curr = t_curr.cross(n_curr).normalized()
-            normals.append(n_curr)
-            binormals.append(b_curr)
-
-        # 3. Loft profile along stations
-        prof_pts = profile.points
-        m_count = len(prof_pts)
-        mesh_verts: List[Tuple[float, float, float]] = []
-        mesh_faces: List[List[int]] = []
-        mesh_edges_set = set()
-
-        def _add_edge(a: int, b: int) -> None:
-            mesh_edges_set.add((min(a, b), max(a, b)))
-
-        s_end = float(scale_end)
-        for i in range(k_count):
-            t_ratio = i / float(k_count - 1) if k_count > 1 else 0.0
-            scale = 1.0 + (s_end - 1.0) * t_ratio
-            origin = pts_rail[i]
-            n_vec = normals[i]
-            b_vec = binormals[i]
-            t_vec = tangents[i]
-
-            for p in prof_pts:
-                # Map 2D profile coordinates (x, y) to normal and binormal
-                pos = origin + (n_vec * (p.x * scale)) + (b_vec * (p.y * scale)) + (t_vec * (p.z * scale))
-                mesh_verts.append((pos.x, pos.y, pos.z))
-
-        # Quad faces connecting consecutive stations
-        seg_count = m_count if profile.closed else m_count - 1
-        for i in range(k_count - 1):
-            base_a = i * m_count
-            base_b = (i + 1) * m_count
-            for j in range(seg_count):
-                j_next = (j + 1) % m_count
-                i00 = base_a + j
-                i10 = base_b + j
-                i11 = base_b + j_next
-                i01 = base_a + j_next
-                mesh_faces.append([i00, i10, i11, i01])
-                _add_edge(i00, i10)
-                _add_edge(i10, i11)
-                _add_edge(i11, i01)
-                _add_edge(i01, i00)
-
-        # 4. Caps
-        if capped and profile.closed and not rail.closed and m_count >= 3:
-            # Start cap (facing backward: reversed)
-            start_cap = list(reversed(range(0, m_count)))
-            # End cap (facing forward)
-            end_base = (k_count - 1) * m_count
-            end_cap = list(range(end_base, end_base + m_count))
-            mesh_faces.insert(0, start_cap)
-            mesh_faces.append(end_cap)
-
-        return {
-            "solid": MeshData(
-                vertices=mesh_verts,
-                faces=mesh_faces,
-                edges=list(mesh_edges_set),
-                name="Sweep_Solid",
+        solids: List[MeshData] = []
+        for rc in rail_curves:
+            m = self._sweep_single_rail(
+                profile=profile,
+                rail=rc,
+                capped=capped,
+                miter=miter,
+                flip_z=flip_z,
+                scale_end=scale_end,
             )
-        }
+            if m.vertices or m.faces:
+                solids.append(m)
+
+        if len(solids) > 1:
+            combined = MeshData.merge(solids, name="Sweep_Solid")
+            return {"solid": combined}
+        elif len(solids) == 1:
+            return {"solid": solids[0]}
+        else:
+            return {"solid": MeshData(name="Sweep_Solid")}
 
 
 # ============================================================================
@@ -1025,3 +1179,140 @@ class LoftNode(BaseNode):
             "mesh": loft_mesh,
             "curves": out_curves,
         }
+
+
+# ============================================================================
+# 12. Transform Mirror Node
+# ============================================================================
+@register_node
+class TransformMirrorNode(BaseNode):
+    type_id = "xform.mirror"
+    title = "Mirror"
+    category = "Transforms"
+    description = (
+        "Mirrors 3D geometry or points across a plane (XY, XZ, YZ, or custom plane/origin/normal).\n"
+        "Automatically reverses face winding on meshes so surface normals remain outward-pointing.\n"
+        "Includes an optional 'Copy' toggle to preserve the original geometry alongside the mirrored copy."
+    )
+    header_color = (230, 126, 34)
+    icon = "transform.mirror.png"
+
+    inputs = [
+        InputSpec("geometry", "Geometry", SocketType.ANY, default=None, hide_widget=True),
+        InputSpec("plane", "Plane", SocketType.ANY, default=None, hide_widget=True),
+        InputSpec("plane_type", "Plane Axis", SocketType.STRING, default="XY", choices=["XY", "XZ", "YZ", "Custom"]),
+        InputSpec("origin", "Origin", SocketType.VEC3, default=Vec3(0, 0, 0), hide_widget=True),
+        InputSpec("normal", "Normal", SocketType.VEC3, default=Vec3(0, 0, 1), hide_widget=True),
+        InputSpec("copy", "Copy", SocketType.BOOL, default=False),
+    ]
+    outputs = [
+        OutputSpec("result", "Result", SocketType.ANY),
+        OutputSpec("mirrored", "Mirrored", SocketType.ANY),
+    ]
+
+    def compute(
+        self,
+        geometry: Any = None,
+        plane: Any = None,
+        plane_type: str = "XY",
+        origin: Any = None,
+        normal: Any = None,
+        copy: bool = False,
+    ) -> Dict[str, Any]:
+        # Determine mirror plane origin and unit normal
+        if plane is not None:
+            p0, _u, _v, n = extract_plane_frame(plane)
+        else:
+            p0 = origin if isinstance(origin, Vec3) else Vec3(0, 0, 0)
+            pt_mode = str(plane_type).strip().upper() if plane_type else "XY"
+            if pt_mode == "XY":
+                n = Vec3(0, 0, 1)
+            elif pt_mode == "XZ":
+                n = Vec3(0, 1, 0)
+            elif pt_mode == "YZ":
+                n = Vec3(1, 0, 0)
+            else:  # Custom
+                n = normal if isinstance(normal, Vec3) else Vec3(0, 0, 1)
+
+        length = math.sqrt(n.x * n.x + n.y * n.y + n.z * n.z)
+        if length < 1e-9:
+            n = Vec3(0, 0, 1)
+        else:
+            n = Vec3(n.x / length, n.y / length, n.z / length)
+
+        def _mirror_point(p: Vec3) -> Vec3:
+            diff = p - p0
+            dot = diff.x * n.x + diff.y * n.y + diff.z * n.z
+            return p - n * (2.0 * dot)
+
+        def _mirror_mesh(mesh: MeshData) -> MeshData:
+            new_verts = []
+            for v in mesh.vertices:
+                pt = Vec3(v[0], v[1], v[2])
+                m_pt = _mirror_point(pt)
+                new_verts.append((m_pt.x, m_pt.y, m_pt.z))
+
+            # Mirror reflection inverts spatial orientation (determinant = -1).
+            # To preserve outward surface normals, reverse the vertex winding of each face:
+            new_faces = [list(reversed(f)) for f in mesh.faces]
+
+            new_edges = []
+            if mesh.edges:
+                new_edges = [(e[1], e[0]) for e in mesh.edges]
+
+            new_mesh = MeshData(
+                vertices=new_verts,
+                faces=new_faces,
+                edges=new_edges,
+                name=f"{mesh.name}_mirrored" if mesh.name else "MirroredMesh",
+                material_name=mesh.material_name,
+                color=mesh.color,
+                face_materials=list(mesh.face_materials) if mesh.face_materials else [],
+                face_colors=list(mesh.face_colors) if mesh.face_colors else [],
+                ifc_class=mesh.ifc_class,
+            )
+            return new_mesh
+
+        def _mirror_curve(c: CurveData) -> CurveData:
+            new_pts = [_mirror_point(p) for p in c.points]
+            res_c = CurveData(points=new_pts, closed=c.closed)
+            c_norm = getattr(c, "normal", None)
+            if c_norm is not None:
+                dot = c_norm.x * n.x + c_norm.y * n.y + c_norm.z * n.z
+                res_c.normal = c_norm - n * (2.0 * dot)
+            return res_c
+
+        def _mirror_item(item: Any) -> Any:
+            if isinstance(item, MeshData):
+                return _mirror_mesh(item)
+            if isinstance(item, CurveData):
+                return _mirror_curve(item)
+            if isinstance(item, Vec3):
+                return _mirror_point(item)
+            if isinstance(item, tuple) and len(item) == 3:
+                pt = Vec3(float(item[0]), float(item[1]), float(item[2]))
+                m_pt = _mirror_point(pt)
+                return (m_pt.x, m_pt.y, m_pt.z)
+            if isinstance(item, list):
+                return [_mirror_item(x) for x in item]
+            return item
+
+        if geometry is None:
+            geometry = CurveData(points=[Vec3(1, 1, 0), Vec3(3, 1, 0), Vec3(3, 2, 0), Vec3(1, 2, 0)], closed=True)
+
+        mirrored_geom = _mirror_item(geometry)
+
+        if copy:
+            if isinstance(geometry, list):
+                result_val = list(geometry) + (mirrored_geom if isinstance(mirrored_geom, list) else [mirrored_geom])
+            else:
+                result_val = [geometry, mirrored_geom]
+        else:
+            result_val = mirrored_geom
+
+        return {
+            "result": result_val,
+            "mirrored": mirrored_geom,
+        }
+
+NODE_REGISTRY["transform.mirror"] = TransformMirrorNode

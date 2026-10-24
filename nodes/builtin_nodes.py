@@ -3,16 +3,17 @@
 
 from __future__ import annotations
 import ast
+import copy
 import math
 import operator
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, Tuple
 
 try:
-    from ..core_types import AccessMode, CurveData, MeshData, SocketType, Vec3
-    from ..node_base import BaseNode, InputSpec, OutputSpec, register_node
+    from ..core_types import AccessMode, CurveData, MeshData, SocketType, Vec3, extract_plane_frame
+    from ..node_base import BaseNode, DynamicInputsMixin, InputSpec, OutputSpec, register_node, NODE_REGISTRY
 except (ImportError, ValueError):
-    from core_types import AccessMode, CurveData, MeshData, SocketType, Vec3
-    from node_base import BaseNode, InputSpec, OutputSpec, register_node
+    from core_types import AccessMode, CurveData, MeshData, SocketType, Vec3, extract_plane_frame
+    from node_base import BaseNode, DynamicInputsMixin, InputSpec, OutputSpec, register_node, NODE_REGISTRY
 
 
 # ============================================================================
@@ -214,7 +215,7 @@ class SeriesNode(BaseNode):
     type_id = "math.series"
     description = "Generates an arithmetic series of numbers."
     title = "Series (Range)"
-    category = "Math & Lists"
+    category = "Math"
     header_color = (60, 100, 140)
     inputs = [
         InputSpec("start", "Start", SocketType.FLOAT, default=0.0, step=0.5),
@@ -264,7 +265,7 @@ class MathExpressionNode(BaseNode):
     type_id = "math.expression"
     description = "Evaluates a mathematical formula expression f(x, y)."
     title = "Math Expression"
-    category = "Math & Lists"
+    category = "Math"
     header_color = (60, 100, 140)
     inputs = [
         InputSpec("expr", "f(x,y)", SocketType.STRING, default="sin(x) * cos(y) + 2.0"),
@@ -286,7 +287,7 @@ class DivideDomainNode(BaseNode):
     type_id = "math.divide_domain"
     description = "Divides a numeric range or interval into N equal steps."
     title = "Divide Domain"
-    category = "Math & Lists"
+    category = "Math"
     header_color = (60, 100, 140)
     inputs = [
         InputSpec("start", "Start", SocketType.FLOAT, default=0.0, step=0.5),
@@ -312,7 +313,7 @@ class CrossReferenceNode(BaseNode):
     type_id = "math.cross_reference"
     description = "Performs Cartesian cross-referencing between two lists."
     title = "Cross Reference"
-    category = "Math & Lists"
+    category = "Lists"
     header_color = (60, 100, 140)
     inputs = [
         InputSpec("list_a", "List A", SocketType.ANY, default=[], access=AccessMode.LIST, hide_widget=True),
@@ -337,12 +338,309 @@ class CrossReferenceNode(BaseNode):
         return {"a_out": out_a, "b_out": out_b}
 
 
+# ============================================================================
+# 3B. LIST PROCESSING & AGGREGATION NODES
+# ============================================================================
+@register_node
+class CreateListNode(DynamicInputsMixin, BaseNode):
+    type_id = "list.create"
+    description = "Creates a combined list from multiple individual items or sub-lists (Grasshopper Merge parity)."
+    title = "Create List"
+    category = "Lists"
+    header_color = (60, 100, 140)
+    icon_tag = "📋"
+    min_inputs = 2
+    max_inputs = 100
+    default_input_count = 4
+    input_prefix = "item_"
+    input_label_prefix = "Item "
+    inputs = [
+        InputSpec("count", "Inputs", SocketType.INT, default=4, min_val=2, max_val=100, step=1, hide_socket=True),
+        InputSpec("item_0", "Item 0", SocketType.ANY, default=[], access=AccessMode.LIST, hide_widget=True),
+        InputSpec("item_1", "Item 1", SocketType.ANY, default=[], access=AccessMode.LIST, hide_widget=True),
+        InputSpec("item_2", "Item 2", SocketType.ANY, default=[], access=AccessMode.LIST, hide_widget=True),
+        InputSpec("item_3", "Item 3", SocketType.ANY, default=[], access=AccessMode.LIST, hide_widget=True),
+        InputSpec("flatten", "Flatten", SocketType.BOOL, default=True),
+    ]
+    outputs = [
+        OutputSpec("list", "List", SocketType.ANY),
+        OutputSpec("length", "Length", SocketType.INT),
+    ]
+
+    def compute(
+        self,
+        item_0: Any = None,
+        item_1: Any = None,
+        item_2: Any = None,
+        item_3: Any = None,
+        flatten: bool = True,
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
+        count = int(kwargs.get("count", self.param_values.get("count", self.default_input_count)))
+        flatten = bool(flatten if "flatten" not in kwargs else kwargs.get("flatten"))
+        res: List[Any] = []
+
+        def _collect(val: Any) -> None:
+            if flatten and isinstance(val, (list, tuple)):
+                for sub in val:
+                    _collect(sub)
+            else:
+                res.append(val)
+
+        kwargs["item_0"] = item_0 if item_0 is not None else kwargs.get("item_0")
+        kwargs["item_1"] = item_1 if item_1 is not None else kwargs.get("item_1")
+        kwargs["item_2"] = item_2 if item_2 is not None else kwargs.get("item_2")
+        kwargs["item_3"] = item_3 if item_3 is not None else kwargs.get("item_3")
+
+        for i in range(count):
+            val = kwargs.get(f"item_{i}")
+            if val is None:
+                continue
+            if isinstance(val, (list, tuple)):
+                for it in val:
+                    if it is not None:
+                        _collect(it)
+            else:
+                _collect(val)
+
+        return {"list": res, "length": len(res)}
+
+
+@register_node
+class MergeListNode(DynamicInputsMixin, BaseNode):
+    type_id = "list.merge"
+    description = "Merges multiple data streams into a single list (Grasshopper Merge node parity)."
+    title = "Merge (List)"
+    category = "Lists"
+    header_color = (60, 100, 140)
+    icon_tag = "🔀"
+    min_inputs = 2
+    max_inputs = 100
+    default_input_count = 4
+    input_prefix = "d"
+    input_label_prefix = "D"
+    inputs = [
+        InputSpec("count", "Inputs", SocketType.INT, default=4, min_val=2, max_val=100, step=1, hide_socket=True),
+        InputSpec("d0", "D0", SocketType.ANY, default=[], access=AccessMode.LIST, hide_widget=True),
+        InputSpec("d1", "D1", SocketType.ANY, default=[], access=AccessMode.LIST, hide_widget=True),
+        InputSpec("d2", "D2", SocketType.ANY, default=[], access=AccessMode.LIST, hide_widget=True),
+        InputSpec("d3", "D3", SocketType.ANY, default=[], access=AccessMode.LIST, hide_widget=True),
+        InputSpec("flatten", "Flatten", SocketType.BOOL, default=True),
+    ]
+    outputs = [
+        OutputSpec("result", "Result", SocketType.ANY),
+        OutputSpec("length", "Length", SocketType.INT),
+    ]
+
+    def compute(
+        self,
+        d0: Any = None,
+        d1: Any = None,
+        d2: Any = None,
+        d3: Any = None,
+        flatten: bool = True,
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
+        count = int(kwargs.get("count", self.param_values.get("count", self.default_input_count)))
+        flatten = bool(flatten if "flatten" not in kwargs else kwargs.get("flatten"))
+        res: List[Any] = []
+
+        def _collect(val: Any) -> None:
+            if flatten and isinstance(val, (list, tuple)):
+                for sub in val:
+                    _collect(sub)
+            else:
+                res.append(val)
+
+        kwargs["d0"] = d0 if d0 is not None else kwargs.get("d0")
+        kwargs["d1"] = d1 if d1 is not None else kwargs.get("d1")
+        kwargs["d2"] = d2 if d2 is not None else kwargs.get("d2")
+        kwargs["d3"] = d3 if d3 is not None else kwargs.get("d3")
+
+        for i in range(count):
+            val = kwargs.get(f"d{i}")
+            if val is None:
+                continue
+            if isinstance(val, (list, tuple)):
+                for it in val:
+                    if it is not None:
+                        _collect(it)
+            else:
+                _collect(val)
+
+        return {"result": res, "length": len(res)}
+
+
+@register_node
+class ListJoinNode(DynamicInputsMixin, BaseNode):
+    type_id = "list.join"
+    description = "Combines multiple lists into a single concatenated list."
+    title = "List Join"
+    category = "Lists"
+    header_color = (60, 100, 140)
+    icon_tag = "➕"
+    min_inputs = 2
+    max_inputs = 100
+    default_input_count = 2
+    input_prefix = "list_"
+    inputs = [
+        InputSpec("count", "Inputs", SocketType.INT, default=2, min_val=2, max_val=100, step=1, hide_socket=True),
+        InputSpec("list_a", "List A", SocketType.ANY, default=[], access=AccessMode.LIST, hide_widget=True),
+        InputSpec("list_b", "List B", SocketType.ANY, default=[], access=AccessMode.LIST, hide_widget=True),
+        InputSpec("flatten", "Flatten", SocketType.BOOL, default=False),
+    ]
+    outputs = [
+        OutputSpec("list", "Combined List", SocketType.ANY),
+        OutputSpec("length", "Length", SocketType.INT),
+    ]
+
+    def _is_dynamic_pin_id(self, spec_id: str) -> bool:
+        return spec_id.startswith("list_") and spec_id != "list_in"
+
+    def _get_dynamic_pin_id_and_label(self, idx: int) -> Tuple[str, str]:
+        letter = chr(ord('a') + idx) if idx < 26 else str(idx)
+        return f"list_{letter}", f"List {letter.upper()}"
+
+    def compute(
+        self,
+        list_a: Any = None,
+        list_b: Any = None,
+        flatten: bool = False,
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
+        count = int(kwargs.get("count", self.param_values.get("count", self.default_input_count)))
+        flatten = bool(flatten if "flatten" not in kwargs else kwargs.get("flatten"))
+        res: List[Any] = []
+
+        def _add(items: List[Any]) -> None:
+            for it in items:
+                if it is None:
+                    continue
+                if flatten and isinstance(it, (list, tuple)):
+                    for sub in it:
+                        _add([sub])
+                else:
+                    res.append(it)
+
+        kwargs["list_a"] = list_a if list_a is not None else kwargs.get("list_a")
+        kwargs["list_b"] = list_b if list_b is not None else kwargs.get("list_b")
+
+        for i in range(count):
+            letter = chr(ord('a') + i) if i < 26 else str(i)
+            val = kwargs.get(f"list_{letter}", kwargs.get(f"list_{i}"))
+            if val is None:
+                continue
+            la = list(val) if isinstance(val, (list, tuple)) else ([val] if val is not None else [])
+            _add(la)
+
+        return {"list": res, "length": len(res)}
+
+
+@register_node
+class ListItemNode(BaseNode):
+    type_id = "list.item"
+    description = "Retrieves an item from a list at the specified index (Grasshopper List Item parity)."
+    title = "List Item"
+    category = "Lists"
+    header_color = (60, 100, 140)
+    icon_tag = "🔍"
+    inputs = [
+        InputSpec("list_in", "List", SocketType.ANY, default=[], access=AccessMode.LIST, hide_widget=True),
+        InputSpec("index", "Index", SocketType.INT, default=0, step=1, access=AccessMode.ITEM),
+        InputSpec("wrap", "Wrap Index", SocketType.BOOL, default=True, access=AccessMode.ITEM),
+    ]
+    outputs = [
+        OutputSpec("item", "Item", SocketType.ANY),
+    ]
+
+    def compute(self, list_in: List[Any], index: int = 0, wrap: bool = True) -> Dict[str, Any]:
+        if not list_in:
+            return {"item": None}
+        n = len(list_in)
+        if wrap:
+            idx = int(index) % n
+        else:
+            idx = max(0, min(int(index), n - 1))
+        return {"item": list_in[idx]}
+
+
+@register_node
+class ListLengthNode(BaseNode):
+    type_id = "list.length"
+    description = "Measures the number of items in a list (Grasshopper List Length parity)."
+    title = "List Length"
+    category = "Lists"
+    header_color = (60, 100, 140)
+    icon_tag = "#"
+    inputs = [
+        InputSpec("list_in", "List", SocketType.ANY, default=[], access=AccessMode.LIST, hide_widget=True),
+    ]
+    outputs = [
+        OutputSpec("length", "Length", SocketType.INT),
+    ]
+
+    def compute(self, list_in: List[Any]) -> Dict[str, Any]:
+        return {"length": len(list_in)}
+
+
+@register_node
+class ReverseListNode(BaseNode):
+    type_id = "list.reverse"
+    description = "Reverses the order of items in a list."
+    title = "Reverse List"
+    category = "Lists"
+    header_color = (60, 100, 140)
+    icon_tag = "🔁"
+    inputs = [
+        InputSpec("list_in", "List", SocketType.ANY, default=[], access=AccessMode.LIST, hide_widget=True),
+    ]
+    outputs = [
+        OutputSpec("list", "Reversed List", SocketType.ANY),
+        OutputSpec("length", "Length", SocketType.INT),
+    ]
+
+    def compute(self, list_in: List[Any]) -> Dict[str, Any]:
+        rev = list(reversed(list_in))
+        return {"list": rev, "length": len(rev)}
+
+
+@register_node
+class FlattenListNode(BaseNode):
+    type_id = "list.flatten"
+    description = "Flattens nested lists or tuples into a flat 1-dimensional list."
+    title = "Flatten List"
+    category = "Lists"
+    header_color = (60, 100, 140)
+    icon_tag = "⬇️"
+    inputs = [
+        InputSpec("list_in", "List", SocketType.ANY, default=[], access=AccessMode.LIST, hide_widget=True),
+    ]
+    outputs = [
+        OutputSpec("list", "Flattened List", SocketType.ANY),
+        OutputSpec("length", "Length", SocketType.INT),
+    ]
+
+    def compute(self, list_in: List[Any]) -> Dict[str, Any]:
+        flat: List[Any] = []
+
+        def _flat(it: Any) -> None:
+            if isinstance(it, (list, tuple)):
+                for sub in it:
+                    _flat(sub)
+            else:
+                flat.append(it)
+
+        for elem in list_in:
+            _flat(elem)
+        return {"list": flat, "length": len(flat)}
+
+
 @register_node
 class MathAddNode(BaseNode):
     type_id = "math.add"
     description = "Adds numbers, vectors, or lists."
     title = "Add"
-    category = "Math & Lists"
+    category = "Math"
     header_color = (60, 100, 140)
     inputs = [
         InputSpec("a", "A", SocketType.ANY, default=0.0),
@@ -370,7 +668,7 @@ class MathSubtractNode(BaseNode):
     type_id = "math.subtract"
     description = "Subtracts input B from input A."
     title = "Subtract"
-    category = "Math & Lists"
+    category = "Math"
     header_color = (60, 100, 140)
     inputs = [
         InputSpec("a", "A", SocketType.ANY, default=0.0),
@@ -398,7 +696,7 @@ class MathMultiplyNode(BaseNode):
     type_id = "math.multiply"
     description = "Multiplies numbers, vectors, or lists."
     title = "Multiply"
-    category = "Math & Lists"
+    category = "Math"
     header_color = (60, 100, 140)
     inputs = [
         InputSpec("a", "A", SocketType.ANY, default=1.0),
@@ -424,7 +722,7 @@ class MathDivideNode(BaseNode):
     type_id = "math.divide"
     description = "Divides input A by input B."
     title = "Divide"
-    category = "Math & Lists"
+    category = "Math"
     header_color = (60, 100, 140)
     inputs = [
         InputSpec("a", "A", SocketType.ANY, default=1.0),
@@ -659,26 +957,55 @@ class PlaneFromNormalNode(BaseNode):
 @register_node
 class RectangleProfileNode(BaseNode):
     type_id = "curve.rectangle_profile"
-    description = "Generates a 2D rectangular profile polyline from origin and dimensions."
+    icon = "curve.rectangle_profile.png"
+    description = (
+        "Generates a 2D rectangular profile polyline from origin and dimensions.\n"
+        "Supports drawing from corner or centered, with optional plane orientation."
+    )
     title = "Rectangle Profile"
     category = "Curves"
     header_color = (165, 105, 45)
     inputs = [
-        InputSpec("origin", "Origin", SocketType.VEC3, default=Vec3(0, 0, 0), hide_widget=True),
+        InputSpec("origin", "Origin / Plane", SocketType.ANY, default=Vec3(0, 0, 0), hide_widget=True),
+        InputSpec("plane", "Plane", SocketType.ANY, default=None, hide_widget=True),
         InputSpec("width", "Width (X)", SocketType.FLOAT, default=4.0, min_val=0.01, step=0.25),
         InputSpec("length", "Length (Y)", SocketType.FLOAT, default=3.0, min_val=0.01, step=0.25),
+        InputSpec("centered", "Center", SocketType.BOOL, default=False),
     ]
     outputs = [
         OutputSpec("curve", "Profile", SocketType.CURVE),
     ]
 
-    def compute(self, origin: Vec3, width: float, length: float) -> Dict[str, Any]:
-        x0, y0, z0 = origin.x, origin.y, origin.z
+    def compute(
+        self,
+        origin: Any = None,
+        width: float = 4.0,
+        length: float = 3.0,
+        centered: bool = False,
+        plane: Any = None,
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
+        frame_src = plane if plane is not None else origin
+        p0, u, v, n = extract_plane_frame(frame_src)
+        w = max(1e-4, float(width))
+        l = max(1e-4, float(length))
+        if centered:
+            hw, hl = w * 0.5, l * 0.5
+            x0, x1 = -hw, hw
+            y0, y1 = -hl, hl
+        else:
+            x0, x1 = 0.0, w
+            y0, y1 = 0.0, l
+
+        local_pts = [
+            (x0, y0),
+            (x1, y0),
+            (x1, y1),
+            (x0, y1),
+        ]
         pts = [
-            Vec3(x0, y0, z0),
-            Vec3(x0 + width, y0, z0),
-            Vec3(x0 + width, y0 + length, z0),
-            Vec3(x0, y0 + length, z0),
+            Vec3(p0.x + lx * u.x + ly * v.x, p0.y + lx * u.y + ly * v.y, p0.z + lx * u.z + ly * v.z)
+            for lx, ly in local_pts
         ]
         return {"curve": CurveData(points=pts, closed=True)}
 
@@ -686,22 +1013,48 @@ class RectangleProfileNode(BaseNode):
 @register_node
 class BoxSolidNode(BaseNode):
     type_id = "solid.box"
-    description = "Generates a 3D watertight cuboid / box solid."
+    description = (
+        "Generates a 3D watertight cuboid / box solid.\n"
+        "Supports drawing from corner or centered on origin/plane, with optional plane orientation."
+    )
     title = "Box (Cuboid)"
     category = "3D Solids"
     header_color = (125, 70, 150)
     inputs = [
-        InputSpec("origin", "Origin", SocketType.VEC3, default=Vec3(0, 0, 0), hide_widget=True),
+        InputSpec("origin", "Origin / Plane", SocketType.ANY, default=Vec3(0, 0, 0), hide_widget=True),
+        InputSpec("plane", "Plane", SocketType.ANY, default=None, hide_widget=True),
         InputSpec("dx", "Size X (m)", SocketType.FLOAT, default=2.0, min_val=0.01, step=0.2),
         InputSpec("dy", "Size Y (m)", SocketType.FLOAT, default=2.0, min_val=0.01, step=0.2),
         InputSpec("dz", "Height Z (m)", SocketType.FLOAT, default=3.0, min_val=0.01, step=0.2),
+        InputSpec("centered", "Center", SocketType.BOOL, default=False),
+        InputSpec("center_z", "Center Z", SocketType.BOOL, default=False),
     ]
     outputs = [
         OutputSpec("mesh", "Solid", SocketType.MESH),
     ]
 
-    def compute(self, origin: Vec3, dx: float, dy: float, dz: float) -> Dict[str, Any]:
-        return {"mesh": MeshData.create_box(origin, dx, dy, dz)}
+    def compute(
+        self,
+        origin: Any = None,
+        dx: float = 2.0,
+        dy: float = 2.0,
+        dz: float = 3.0,
+        centered: bool = False,
+        center_z: bool = False,
+        plane: Any = None,
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
+        return {
+            "mesh": MeshData.create_box(
+                origin=origin,
+                dx=dx,
+                dy=dy,
+                dz=dz,
+                centered=bool(centered),
+                center_z=bool(center_z),
+                plane=plane,
+            )
+        }
 
 
 @register_node
@@ -897,3 +1250,415 @@ class IngeTrazoOutputNode(BaseNode):
                 copied.ifc_class = ifc_class
             out_list.append(copied)
         return {"mesh_out": out_list}
+
+
+# ============================================================================
+# XY Plane Node
+# ============================================================================
+@register_node
+class XYPlaneNode(BaseNode):
+    type_id = "plane.xy"
+    title = "XY Plane"
+    category = "Points & Vectors"
+    description = (
+        "Creates a standard World XY construction plane (Normal Z = [0, 0, 1], U = [1, 0, 0], V = [0, 1, 0]) at an origin point.\n"
+        "Emits origin, unit normal, unit U, unit V, a visual boundary rectangle, and a standard plane frame."
+    )
+    header_color = (58, 125, 68)
+    icon = "plane.xy.png"
+
+    inputs = [
+        InputSpec("origin", "Origin", SocketType.VEC3, default=Vec3(0, 0, 0), hide_widget=True),
+        InputSpec("size", "Preview Size (m)", SocketType.FLOAT, default=2.0, min_val=0.1, step=0.5),
+    ]
+    outputs = [
+        OutputSpec("origin", "Origin", SocketType.VEC3),
+        OutputSpec("normal", "Normal (Z)", SocketType.VEC3),
+        OutputSpec("u_axis", "U Axis (X)", SocketType.VEC3),
+        OutputSpec("v_axis", "V Axis (Y)", SocketType.VEC3),
+        OutputSpec("preview", "Plane Preview", SocketType.CURVE),
+        OutputSpec("plane", "Plane", SocketType.ANY),
+    ]
+
+    def compute(self, origin: Any = None, size: float = 2.0) -> Dict[str, Any]:
+        p0 = origin if isinstance(origin, Vec3) else Vec3(0, 0, 0)
+        n = Vec3(0, 0, 1)
+        u = Vec3(1, 0, 0)
+        v = Vec3(0, 1, 0)
+
+        s = float(size) * 0.5
+        c0 = p0 - u * s - v * s
+        c1 = p0 + u * s - v * s
+        c2 = p0 + u * s + v * s
+        c3 = p0 - u * s + v * s
+        preview_curve = CurveData(points=[c0, c1, c2, c3], closed=True)
+
+        plane_dict = {
+            "origin": (p0.x, p0.y, p0.z),
+            "normal": (n.x, n.y, n.z),
+            "u_axis": (u.x, u.y, u.z),
+            "v_axis": (v.x, v.y, v.z),
+            "name": "XY",
+        }
+        return {
+            "origin": p0,
+            "normal": n,
+            "u_axis": u,
+            "v_axis": v,
+            "preview": preview_curve,
+            "plane": plane_dict,
+        }
+
+NODE_REGISTRY["vec.plane_xy"] = XYPlaneNode
+
+
+# ============================================================================
+# XZ Plane Node
+# ============================================================================
+@register_node
+class XZPlaneNode(BaseNode):
+    type_id = "plane.xz"
+    title = "XZ Plane"
+    category = "Points & Vectors"
+    description = (
+        "Creates a standard World XZ construction plane (Normal Y = [0, -1, 0], U = [1, 0, 0], V = [0, 0, 1]) at an origin point.\n"
+        "Emits origin, unit normal, unit U, unit V, a visual boundary rectangle, and a standard plane frame."
+    )
+    header_color = (58, 125, 68)
+    icon = "plane.xz.png"
+
+    inputs = [
+        InputSpec("origin", "Origin", SocketType.VEC3, default=Vec3(0, 0, 0), hide_widget=True),
+        InputSpec("size", "Preview Size (m)", SocketType.FLOAT, default=2.0, min_val=0.1, step=0.5),
+    ]
+    outputs = [
+        OutputSpec("origin", "Origin", SocketType.VEC3),
+        OutputSpec("normal", "Normal", SocketType.VEC3),
+        OutputSpec("u_axis", "U Axis (X)", SocketType.VEC3),
+        OutputSpec("v_axis", "V Axis (Z)", SocketType.VEC3),
+        OutputSpec("preview", "Plane Preview", SocketType.CURVE),
+        OutputSpec("plane", "Plane", SocketType.ANY),
+    ]
+
+    def compute(self, origin: Any = None, size: float = 2.0) -> Dict[str, Any]:
+        p0 = origin if isinstance(origin, Vec3) else Vec3(0, 0, 0)
+        u = Vec3(1, 0, 0)
+        v = Vec3(0, 0, 1)
+        n = Vec3(0, -1, 0)
+
+        s = float(size) * 0.5
+        c0 = p0 - u * s - v * s
+        c1 = p0 + u * s - v * s
+        c2 = p0 + u * s + v * s
+        c3 = p0 - u * s + v * s
+        preview_curve = CurveData(points=[c0, c1, c2, c3], closed=True)
+
+        plane_dict = {
+            "origin": (p0.x, p0.y, p0.z),
+            "normal": (n.x, n.y, n.z),
+            "u_axis": (u.x, u.y, u.z),
+            "v_axis": (v.x, v.y, v.z),
+            "name": "XZ",
+        }
+        return {
+            "origin": p0,
+            "normal": n,
+            "u_axis": u,
+            "v_axis": v,
+            "preview": preview_curve,
+            "plane": plane_dict,
+        }
+
+NODE_REGISTRY["vec.plane_xz"] = XZPlaneNode
+
+
+# ============================================================================
+# YZ Plane Node
+# ============================================================================
+@register_node
+class YZPlaneNode(BaseNode):
+    type_id = "plane.yz"
+    title = "YZ Plane"
+    category = "Points & Vectors"
+    description = (
+        "Creates a standard World YZ construction plane (Normal X = [1, 0, 0], U = [0, 1, 0], V = [0, 0, 1]) at an origin point.\n"
+        "Emits origin, unit normal, unit U, unit V, a visual boundary rectangle, and a standard plane frame."
+    )
+    header_color = (58, 125, 68)
+    icon = "plane.yz.png"
+
+    inputs = [
+        InputSpec("origin", "Origin", SocketType.VEC3, default=Vec3(0, 0, 0), hide_widget=True),
+        InputSpec("size", "Preview Size (m)", SocketType.FLOAT, default=2.0, min_val=0.1, step=0.5),
+    ]
+    outputs = [
+        OutputSpec("origin", "Origin", SocketType.VEC3),
+        OutputSpec("normal", "Normal", SocketType.VEC3),
+        OutputSpec("u_axis", "U Axis (Y)", SocketType.VEC3),
+        OutputSpec("v_axis", "V Axis (Z)", SocketType.VEC3),
+        OutputSpec("preview", "Plane Preview", SocketType.CURVE),
+        OutputSpec("plane", "Plane", SocketType.ANY),
+    ]
+
+    def compute(self, origin: Any = None, size: float = 2.0) -> Dict[str, Any]:
+        p0 = origin if isinstance(origin, Vec3) else Vec3(0, 0, 0)
+        u = Vec3(0, 1, 0)
+        v = Vec3(0, 0, 1)
+        n = Vec3(1, 0, 0)
+
+        s = float(size) * 0.5
+        c0 = p0 - u * s - v * s
+        c1 = p0 + u * s - v * s
+        c2 = p0 + u * s + v * s
+        c3 = p0 - u * s + v * s
+        preview_curve = CurveData(points=[c0, c1, c2, c3], closed=True)
+
+        plane_dict = {
+            "origin": (p0.x, p0.y, p0.z),
+            "normal": (n.x, n.y, n.z),
+            "u_axis": (u.x, u.y, u.z),
+            "v_axis": (v.x, v.y, v.z),
+            "name": "YZ",
+        }
+        return {
+            "origin": p0,
+            "normal": n,
+            "u_axis": u,
+            "v_axis": v,
+            "preview": preview_curve,
+            "plane": plane_dict,
+        }
+
+NODE_REGISTRY["vec.plane_yz"] = YZPlaneNode
+
+
+# ============================================================================
+# Center Node (Area / Volume / Centroid)
+# ============================================================================
+@register_node
+class CenterNode(BaseNode):
+    type_id = "point.center"
+    title = "Center"
+    category = "Points & Vectors"
+    description = (
+        "Computes the geometric centroid (center of mass), surface area, 3D volume, and alignment plane\n"
+        "for closed planar curves, polygons, 3D surface meshes, or solid bodies."
+    )
+    header_color = (58, 125, 68)
+    icon = "point.center.png"
+
+    inputs = [
+        InputSpec("geometry", "Geometry", SocketType.ANY, default=None, hide_widget=True),
+    ]
+    outputs = [
+        OutputSpec("center", "Centroid", SocketType.VEC3),
+        OutputSpec("area", "Area (m²)", SocketType.FLOAT),
+        OutputSpec("volume", "Volume (m³)", SocketType.FLOAT),
+        OutputSpec("centers", "Centers", SocketType.ANY),
+        OutputSpec("plane", "Plane", SocketType.ANY),
+    ]
+
+    def compute(self, geometry: Any = None) -> Dict[str, Any]:
+        if geometry is None:
+            geometry = CurveData(
+                points=[Vec3(0, 0, 0), Vec3(2, 0, 0), Vec3(2, 2, 0), Vec3(0, 2, 0)],
+                closed=True,
+            )
+
+        def _compute_single(geom: Any) -> Tuple[Vec3, float, float, Dict[str, Any]]:
+            if isinstance(geom, Vec3):
+                p0 = geom
+                return p0, 0.0, 0.0, {
+                    "origin": (p0.x, p0.y, p0.z),
+                    "normal": (0, 0, 1),
+                    "u_axis": (1, 0, 0),
+                    "v_axis": (0, 1, 0),
+                }
+
+            if isinstance(geom, CurveData):
+                pts = geom.points
+                if not pts:
+                    p0 = Vec3(0, 0, 0)
+                    return p0, 0.0, 0.0, {"origin": (0, 0, 0), "normal": (0, 0, 1), "u_axis": (1, 0, 0), "v_axis": (0, 1, 0)}
+
+                if len(pts) <= 2:
+                    p0 = (pts[0] + pts[-1]) * 0.5
+                    length = (pts[-1] - pts[0]).length() if len(pts) == 2 else 0.0
+                    return p0, length, 0.0, {"origin": (p0.x, p0.y, p0.z), "normal": (0, 0, 1), "u_axis": (1, 0, 0), "v_axis": (0, 1, 0)}
+
+                total_area = 0.0
+                cx, cy, cz = 0.0, 0.0, 0.0
+                norm_accum = Vec3(0, 0, 0)
+                p_base = pts[0]
+
+                n_pts = len(pts)
+                limit = n_pts - 1 if (geom.closed and (pts[-1] - pts[0]).length() < 1e-6) else n_pts
+
+                for i in range(1, limit - 1):
+                    p1 = pts[i]
+                    p2 = pts[i + 1]
+                    v1 = p1 - p_base
+                    v2 = p2 - p_base
+                    cross = Vec3(
+                        v1.y * v2.z - v1.z * v2.y,
+                        v1.z * v2.x - v1.x * v2.z,
+                        v1.x * v2.y - v1.y * v2.x,
+                    )
+                    tri_norm_len = math.sqrt(cross.x * cross.x + cross.y * cross.y + cross.z * cross.z)
+                    tri_area = 0.5 * tri_norm_len
+                    norm_accum = norm_accum + cross
+
+                    tri_center = (p_base + p1 + p2) * (1.0 / 3.0)
+                    cx += tri_center.x * tri_area
+                    cy += tri_center.y * tri_area
+                    cz += tri_center.z * tri_area
+                    total_area += tri_area
+
+                if total_area > 1e-8:
+                    inv_a = 1.0 / total_area
+                    centroid = Vec3(cx * inv_a, cy * inv_a, cz * inv_a)
+                else:
+                    avg_x = sum(p.x for p in pts) / len(pts)
+                    avg_y = sum(p.y for p in pts) / len(pts)
+                    avg_z = sum(p.z for p in pts) / len(pts)
+                    centroid = Vec3(avg_x, avg_y, avg_z)
+
+                norm_len = math.sqrt(norm_accum.x * norm_accum.x + norm_accum.y * norm_accum.y + norm_accum.z * norm_accum.z)
+                if norm_len > 1e-6:
+                    unit_norm = Vec3(norm_accum.x / norm_len, norm_accum.y / norm_len, norm_accum.z / norm_len)
+                elif getattr(geom, 'normal', None) is not None:
+                    unit_norm = getattr(geom, 'normal')
+                else:
+                    unit_norm = Vec3(0, 0, 1)
+
+                guide = Vec3(0, 0, 1) if abs(unit_norm.z) < 0.9 else Vec3(1, 0, 0)
+                u_raw = Vec3(
+                    guide.y * unit_norm.z - guide.z * unit_norm.y,
+                    guide.z * unit_norm.x - guide.x * unit_norm.z,
+                    guide.x * unit_norm.y - guide.y * unit_norm.x,
+                )
+                u_l = math.sqrt(u_raw.x * u_raw.x + u_raw.y * u_raw.y + u_raw.z * u_raw.z)
+                u = Vec3(u_raw.x / u_l, u_raw.y / u_l, u_raw.z / u_l) if u_l > 1e-6 else Vec3(1, 0, 0)
+                v = Vec3(
+                    unit_norm.y * u.z - unit_norm.z * u.y,
+                    unit_norm.z * u.x - unit_norm.x * u.z,
+                    unit_norm.x * u.y - unit_norm.y * u.x,
+                )
+
+                plane_dict = {
+                    "origin": (centroid.x, centroid.y, centroid.z),
+                    "normal": (unit_norm.x, unit_norm.y, unit_norm.z),
+                    "u_axis": (u.x, u.y, u.z),
+                    "v_axis": (v.x, v.y, v.z),
+                }
+                return centroid, total_area, 0.0, plane_dict
+
+            if isinstance(geom, MeshData):
+                verts = [Vec3(v[0], v[1], v[2]) for v in geom.vertices]
+                if not verts or not geom.faces:
+                    p0 = Vec3(0, 0, 0)
+                    return p0, 0.0, 0.0, {"origin": (0, 0, 0), "normal": (0, 0, 1), "u_axis": (1, 0, 0), "v_axis": (0, 1, 0)}
+
+                total_surface_area = 0.0
+                area_cx, area_cy, area_cz = 0.0, 0.0, 0.0
+
+                signed_volume = 0.0
+                vol_cx, vol_cy, vol_cz = 0.0, 0.0, 0.0
+
+                for f in geom.faces:
+                    if len(f) < 3:
+                        continue
+                    v0 = verts[f[0]]
+                    for j in range(1, len(f) - 1):
+                        v1 = verts[f[j]]
+                        v2 = verts[f[j + 1]]
+
+                        # 1. Surface area
+                        e1 = v1 - v0
+                        e2 = v2 - v0
+                        cross = Vec3(
+                            e1.y * e2.z - e1.z * e2.y,
+                            e1.z * e2.x - e1.x * e2.z,
+                            e1.x * e2.y - e1.y * e2.x,
+                        )
+                        tri_area = 0.5 * math.sqrt(cross.x * cross.x + cross.y * cross.y + cross.z * cross.z)
+                        total_surface_area += tri_area
+
+                        tri_c = (v0 + v1 + v2) * (1.0 / 3.0)
+                        area_cx += tri_c.x * tri_area
+                        area_cy += tri_c.y * tri_area
+                        area_cz += tri_c.z * tri_area
+
+                        # 2. Signed tetrahedron volume from origin (0,0,0)
+                        cp = Vec3(
+                            v1.y * v2.z - v1.z * v2.y,
+                            v1.z * v2.x - v1.x * v2.z,
+                            v1.x * v2.y - v1.y * v2.x,
+                        )
+                        tet_vol = (v0.x * cp.x + v0.y * cp.y + v0.z * cp.z) / 6.0
+                        signed_volume += tet_vol
+
+                        tet_c = (v0 + v1 + v2) * 0.25
+                        vol_cx += tet_c.x * tet_vol
+                        vol_cy += tet_c.y * tet_vol
+                        vol_cz += tet_c.z * tet_vol
+
+                abs_vol = abs(signed_volume)
+                if abs_vol > 1e-5:
+                    inv_v = 1.0 / signed_volume
+                    centroid = Vec3(vol_cx * inv_v, vol_cy * inv_v, vol_cz * inv_v)
+                elif total_surface_area > 1e-8:
+                    inv_a = 1.0 / total_surface_area
+                    centroid = Vec3(area_cx * inv_a, area_cy * inv_a, area_cz * inv_a)
+                else:
+                    avg_x = sum(v.x for v in verts) / len(verts)
+                    avg_y = sum(v.y for v in verts) / len(verts)
+                    avg_z = sum(v.z for v in verts) / len(verts)
+                    centroid = Vec3(avg_x, avg_y, avg_z)
+
+                plane_dict = {
+                    "origin": (centroid.x, centroid.y, centroid.z),
+                    "normal": (0, 0, 1),
+                    "u_axis": (1, 0, 0),
+                    "v_axis": (0, 1, 0),
+                }
+                return centroid, total_surface_area, abs_vol, plane_dict
+
+            if isinstance(geom, (list, tuple)):
+                pts = [p if isinstance(p, Vec3) else Vec3(float(p[0]), float(p[1]), float(p[2])) for p in geom if hasattr(p, '__iter__') or isinstance(p, Vec3)]
+                if pts:
+                    avg_x = sum(p.x for p in pts) / len(pts)
+                    avg_y = sum(p.y for p in pts) / len(pts)
+                    avg_z = sum(p.z for p in pts) / len(pts)
+                    c = Vec3(avg_x, avg_y, avg_z)
+                    return c, 0.0, 0.0, {"origin": (c.x, c.y, c.z), "normal": (0, 0, 1), "u_axis": (1, 0, 0), "v_axis": (0, 1, 0)}
+
+            p0 = Vec3(0, 0, 0)
+            return p0, 0.0, 0.0, {"origin": (0, 0, 0), "normal": (0, 0, 1), "u_axis": (1, 0, 0), "v_axis": (0, 1, 0)}
+
+        if isinstance(geometry, list) and geometry and not isinstance(geometry[0], (int, float)):
+            all_res = [_compute_single(item) for item in geometry]
+            centers = [r[0] for r in all_res]
+            total_a = sum(r[1] for r in all_res)
+            total_v = sum(r[2] for r in all_res)
+            first_c = centers[0] if centers else Vec3(0, 0, 0)
+            first_plane = all_res[0][3] if all_res else {}
+            return {
+                "center": first_c,
+                "area": total_a,
+                "volume": total_v,
+                "centers": centers,
+                "plane": first_plane,
+            }
+
+        c, a, v, plane = _compute_single(geometry)
+        return {
+            "center": c,
+            "area": a,
+            "volume": v,
+            "centers": [c],
+            "plane": plane,
+        }
+
+NODE_REGISTRY["geometry.center"] = CenterNode
+NODE_REGISTRY["point.center"] = CenterNode

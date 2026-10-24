@@ -6,15 +6,19 @@ import ast
 import math
 import operator
 import os
+import sys
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from PySide6.QtCore import QEvent, QMimeData, QPoint, QPointF, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import (
+    QGuiApplication,
     QBrush, QColor, QContextMenuEvent, QCursor, QDrag, QFont, QIcon, QKeyEvent, QMouseEvent,
     QPainter, QPainterPath, QPainterPathStroker, QPen, QPixmap, QWheelEvent,
+    QKeySequence, QShortcut,
 )
 from PySide6.QtWidgets import (
+    QMainWindow,
     QApplication, QCheckBox, QColorDialog, QComboBox, QDialog, QDoubleSpinBox,
     QInputDialog, QMessageBox,
     QFileDialog, QFrame, QGraphicsItem, QGraphicsPathItem, QGraphicsProxyWidget,
@@ -737,9 +741,10 @@ class NodeItem(QGraphicsItem):
         for in_spec in self.node.inputs:
             y = self.HEADER_H + 15.0 + row_idx * self.ROW_H
             self._input_row_y[in_spec.id] = y
-            sock = SocketItem(self, in_spec.id, in_spec.label, in_spec.type, is_output=False)
-            sock.setPos(0.0, y)
-            self.input_sockets[in_spec.id] = sock
+            if not getattr(in_spec, "hide_socket", False):
+                sock = SocketItem(self, in_spec.id, in_spec.label, in_spec.type, is_output=False)
+                sock.setPos(0.0, y)
+                self.input_sockets[in_spec.id] = sock
 
             if not in_spec.hide_widget:
                 widget, x_offset = self._create_inline_widget(in_spec)
@@ -797,6 +802,98 @@ class NodeItem(QGraphicsItem):
                 self.proxies["_btn_bake"] = proxy
             row_idx += 1
 
+    def rebuild_sockets(self) -> None:
+        """Dynamically adjusts sockets and widget positions when node inputs change."""
+        self.prepareGeometryChange()
+        sc = self.scene()
+
+        action_buttons = self.node.get_action_buttons() if hasattr(self.node, "get_action_buttons") else []
+        badge_text = self.node.get_card_badge_text() if hasattr(self.node, "get_card_badge_text") else None
+        extra_rows = len(action_buttons) + (1 if badge_text is not None else 0)
+
+        total_rows = max(1, len(self.node.outputs) + len(self.node.inputs)) + extra_rows
+        self.height = self.HEADER_H + total_rows * self.ROW_H + 10.0
+
+        row_idx = 0
+        for out_spec in self.node.outputs:
+            y = self.HEADER_H + 15.0 + row_idx * self.ROW_H
+            self._output_row_y[out_spec.id] = y
+            sock = self.output_sockets.get(out_spec.id)
+            if sock is None:
+                sock = SocketItem(self, out_spec.id, out_spec.label, out_spec.type, is_output=True)
+                self.output_sockets[out_spec.id] = sock
+            sock.setPos(self.WIDTH, y)
+            row_idx += 1
+
+        active_input_ids = {spec.id for spec in self.node.inputs}
+        for in_id in list(self.input_sockets.keys()):
+            if in_id not in active_input_ids:
+                old_sock = self.input_sockets.pop(in_id)
+                if sc and hasattr(sc, "wire_items"):
+                    for wi in list(sc.wire_items):
+                        if wi.dst_sock == old_sock:
+                            if wi.wire_model and hasattr(sc, "engine"):
+                                sc.engine.disconnect(wi.wire_model)
+                            sc.removeItem(wi)
+                            if wi in sc.wire_items:
+                                sc.wire_items.remove(wi)
+                if sc:
+                    sc.removeItem(old_sock)
+
+        for p_id in list(self.proxies.keys()):
+            if p_id not in active_input_ids and not p_id.startswith("_") and p_id not in ("_btn_bake", "_card_badge"):
+                old_proxy = self.proxies.pop(p_id)
+                if sc:
+                    sc.removeItem(old_proxy)
+
+        for in_spec in self.node.inputs:
+            y = self.HEADER_H + 15.0 + row_idx * self.ROW_H
+            self._input_row_y[in_spec.id] = y
+
+            if not getattr(in_spec, "hide_socket", False):
+                sock = self.input_sockets.get(in_spec.id)
+                if sock is None:
+                    sock = SocketItem(self, in_spec.id, in_spec.label, in_spec.type, is_output=False)
+                    self.input_sockets[in_spec.id] = sock
+                sock.setPos(0.0, y)
+            else:
+                if in_spec.id in self.input_sockets:
+                    old_sock = self.input_sockets.pop(in_spec.id)
+                    if sc:
+                        sc.removeItem(old_sock)
+
+            if not in_spec.hide_widget:
+                proxy = self.proxies.get(in_spec.id)
+                if proxy is None:
+                    widget, x_offset = self._create_inline_widget(in_spec)
+                    if widget is not None:
+                        proxy = QGraphicsProxyWidget(self)
+                        proxy.setWidget(widget)
+                        proxy.setPos(x_offset, y - 11.0)
+                        proxy.setZValue(20.0 if isinstance(widget, NodeComboBox) else 10.0)
+                        self.proxies[in_spec.id] = proxy
+                else:
+                    proxy.setPos(proxy.pos().x(), y - 11.0)
+
+            row_idx += 1
+
+        if badge_text is not None and "_card_badge" in self.proxies:
+            y = self.HEADER_H + 15.0 + row_idx * self.ROW_H
+            self.proxies["_card_badge"].setPos(12.0, y - 10.0)
+            row_idx += 1
+
+        for btn_spec in action_buttons:
+            btn_id = btn_spec.get("id", f"btn_{row_idx}")
+            if btn_id in self.proxies:
+                y = self.HEADER_H + 15.0 + row_idx * self.ROW_H
+                self.proxies[btn_id].setPos(12.0, y - 11.0)
+                row_idx += 1
+
+        if sc and hasattr(sc, "update_wires_for_node"):
+            sc.update_wires_for_node(self.node.id)
+
+        self.update()
+
     def _handle_card_button_click(self, btn_spec: Dict[str, Any]) -> None:
         act = btn_spec.get("action", "")
         sc = self.scene()
@@ -836,6 +933,16 @@ class NodeItem(QGraphicsItem):
                     sc.engine.mark_dirty(self.node.id)
                     sc.trigger_eval()
                 self._update_badge()
+                self._update_action_buttons()
+        elif act in ("sync_face", "sync_curve", "refresh_from_scene"):
+            app = self._get_app_handle()
+            if hasattr(self.node, "sync_from_scene"):
+                changed = self.node.sync_from_scene(app)
+                if sc and hasattr(sc, "engine"):
+                    sc.engine.mark_dirty(self.node.id)
+                    sc.trigger_eval()
+                self._update_badge()
+                self._update_action_buttons()
         elif act in ("clear_face", "clear_curve"):
             if hasattr(self.node, "clear_reference"):
                 self.node.clear_reference()
@@ -843,6 +950,7 @@ class NodeItem(QGraphicsItem):
                     sc.engine.mark_dirty(self.node.id)
                     sc.trigger_eval()
                 self._update_badge()
+                self._update_action_buttons()
         elif hasattr(self.node, act):
             fn = getattr(self.node, act)
             if callable(fn):
@@ -1603,6 +1711,13 @@ class NodeCanvasScene(QGraphicsScene):
         if node_item:
             node_item._update_badge()
             node_item._update_action_buttons()
+            if input_id == "count" and getattr(node_item.node, "is_dynamic_inputs", False):
+                node_item.rebuild_sockets()
+                for view in self.views():
+                    ed = getattr(view, "editor", None) or view.parent()
+                    if ed and hasattr(ed, "inspector") and getattr(ed.inspector, "current_node", None) == node_item.node:
+                        if not getattr(ed.inspector, "_syncing", False):
+                            ed.inspector.populate(node_item.node, node_item, self)
         self.trigger_eval()
 
     def _add_wire_item(self, w: Wire) -> None:
@@ -1623,6 +1738,15 @@ class NodeCanvasScene(QGraphicsScene):
         for wi in self.wire_items:
             if wi.wire_model and (wi.wire_model.src_node == node_id or wi.wire_model.dst_node == node_id):
                 wi.update_path()
+
+    def update_all_badges(self) -> None:
+        """Refreshes status badges and action button labels across all nodes on canvas."""
+        for item in self.node_items.values():
+            if hasattr(item, "_update_badge"):
+                item._update_badge()
+            if hasattr(item, "_update_action_buttons"):
+                item._update_action_buttons()
+
 
     def mousePressEvent(self, event) -> None:
         item = self.itemAt(event.scenePos(), self.views()[0].transform()) if self.views() else None
@@ -1986,6 +2110,12 @@ class NodeCanvasView(QGraphicsView):
             act_bake = menu.addAction(tr("🥐 Bake This Node to Scene"))
             act_bake.triggered.connect(lambda: self.canvas_scene.request_bake(node))
 
+        if getattr(node, "is_dynamic_inputs", False) or hasattr(node, "add_input"):
+            act_add_pin = menu.addAction(tr("➕ Add Input Pin"))
+            act_add_pin.triggered.connect(lambda: self._add_node_input_pin(node_item))
+            act_rem_pin = menu.addAction(tr("➖ Remove Input Pin"))
+            act_rem_pin.triggered.connect(lambda: self._remove_node_input_pin(node_item))
+
         menu.addSeparator()
 
         act_copy = menu.addAction(tr("📄 Copy Node(s) (Ctrl+C)"))
@@ -2175,6 +2305,24 @@ class NodeCanvasView(QGraphicsView):
             it.update()
         self.canvas_scene.trigger_eval()
 
+    def _add_node_input_pin(self, node_item: NodeItem) -> None:
+        if hasattr(node_item.node, "add_input") and node_item.node.add_input():
+            node_item.rebuild_sockets()
+            self.canvas_scene.engine.mark_dirty(node_item.node.id)
+            self.canvas_scene.trigger_eval()
+            ed = getattr(self, "editor", None) or self.parent()
+            if ed and hasattr(ed, "inspector") and getattr(ed.inspector, "current_node", None) == node_item.node:
+                ed.inspector.populate(node_item.node, node_item, self.canvas_scene)
+
+    def _remove_node_input_pin(self, node_item: NodeItem) -> None:
+        if hasattr(node_item.node, "remove_input") and node_item.node.remove_input():
+            node_item.rebuild_sockets()
+            self.canvas_scene.engine.mark_dirty(node_item.node.id)
+            self.canvas_scene.trigger_eval()
+            ed = getattr(self, "editor", None) or self.parent()
+            if ed and hasattr(ed, "inspector") and getattr(ed.inspector, "current_node", None) == node_item.node:
+                ed.inspector.populate(node_item.node, node_item, self.canvas_scene)
+
     def fit_view(self) -> None:
         self._grow_scene_rect()
         rect = self.canvas_scene.itemsBoundingRect()
@@ -2344,7 +2492,7 @@ class InspectorSplitter(QSplitter):
         super().__init__(orientation, parent)
         self.setHandleWidth(16)
         self.is_collapsed: bool = True
-        self.user_collapsed: bool = False  # Track explicit user collapse
+        self.user_collapsed: bool = True  # Disabled/collapsed by default
         self._saved_size: int = 310
         self._handle: Optional[InspectorSplitterHandle] = None
         self.setChildrenCollapsible(True)
@@ -3249,7 +3397,7 @@ class NodeRibbonBar(QWidget):
         pref_order = [
             "Architecture", "Inputs", "Curves", "3D Solids",
             "Transforms", "Material", "Points & Vectors",
-            "Math & Lists", "Scene", "Scene Output"
+            "Math", "Lists", "Scene", "Scene Output"
         ]
         sorted_cats = [c for c in pref_order if c in cat_map]
         for c in sorted(cat_map.keys()):
@@ -3709,7 +3857,7 @@ class CanvasMinimap(QFrame):
 
         self.setToolTip(tr("Minimap – click or drag to navigate"))
         self._reposition()
-        self.show()
+        self.hide()
 
     def _handle_close(self) -> None:
         self.hide()
@@ -3794,6 +3942,125 @@ class CanvasMinimap(QFrame):
 # ============================================================================
 # MAIN NODE EDITOR WIDGET
 # ============================================================================
+class _DockPlaceholderWidget(QWidget):
+    """
+    Lightweight placeholder left inside IngeTrazo's internal QDockWidget while
+    the Node Editor is popped out into an external window, keeping IngeTrazo's
+    internal tray state 100% valid.
+    """
+    def __init__(self, editor: "NodeEditorWidget") -> None:
+        super().__init__()
+        self._editor = editor
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(16, 24, 16, 24)
+        lay.setSpacing(10)
+        lay.addStretch(1)
+
+        lbl = QLabel(tr("Node Editor is open in an external window."))
+        lbl.setWordWrap(True)
+        lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lbl.setStyleSheet("color: #abb2bf; font-size: 12px;")
+        lay.addWidget(lbl)
+
+        btn_front = QPushButton(tr("🗔 Bring Window to Front"))
+        btn_front.setStyleSheet(
+            "background: #3b4252; color: #61afef; border: 1px solid #4c566a; "
+            "border-radius: 4px; padding: 6px 12px; font-weight: bold;"
+        )
+        btn_front.clicked.connect(self._editor.bring_to_front)
+        lay.addWidget(btn_front)
+
+        btn_dock = QPushButton(tr("⇲ Dock Back Here"))
+        btn_dock.setStyleSheet(
+            "background: #2c313a; color: #98c379; border: 1px solid #3e4451; "
+            "border-radius: 4px; padding: 6px 12px;"
+        )
+        btn_dock.clicked.connect(self._editor._dock_tab)
+        lay.addWidget(btn_dock)
+
+        lay.addStretch(1)
+
+
+class NodeEditorFloatingWindow(QMainWindow):
+    """
+    True top-level OS window (`parent=None`) for multi-monitor & OS Aero Snap support.
+    - Supports Windows 11 Snap Layouts, Win+Left/Right monitor edge docking,
+      4-corner/edge resizing, and independent second-monitor placement.
+    - Automatically closes when IngeTrazo's main window closes.
+    - Re-docks cleanly into IngeTrazo's side tray when closed by the user.
+    """
+    def __init__(self, editor: "NodeEditorWidget") -> None:
+        # Use parent=None so the OS treats this as an independent monitor-dockable window
+        super().__init__(None)
+        self._editor = editor
+        self._host_win = editor.get_main_window()
+        self._is_host_closing = False
+        self._always_on_top = False
+
+        self.setWindowFlags(
+            Qt.WindowType.Window
+            | Qt.WindowType.WindowSystemMenuHint
+            | Qt.WindowType.WindowMinMaxButtonsHint
+            | Qt.WindowType.WindowCloseButtonHint
+        )
+        self.setWindowTitle(tr("IngeTrazo — Parametric Node Editor"))
+        self.setMinimumSize(420, 300)
+        self.resize(1180, 720)
+
+        if self._host_win is not None:
+            try:
+                self._host_win.installEventFilter(self)
+                self._host_win.destroyed.connect(self._on_host_destroyed)
+            except Exception:
+                pass
+            if hasattr(self._host_win, "windowIcon") and not self._host_win.windowIcon().isNull():
+                self.setWindowIcon(self._host_win.windowIcon())
+
+        qapp = QApplication.instance()
+        if qapp is not None:
+            try:
+                qapp.aboutToQuit.connect(self._on_host_destroyed)
+            except Exception:
+                pass
+
+    def set_always_on_top(self, enabled: bool) -> None:
+        self._always_on_top = bool(enabled)
+        was_visible = self.isVisible()
+        flags = self.windowFlags()
+        if self._always_on_top:
+            flags |= Qt.WindowType.WindowStaysOnTopHint
+        else:
+            flags &= ~Qt.WindowType.WindowStaysOnTopHint
+        self.setWindowFlags(flags)
+        if was_visible:
+            self.show()
+            self.raise_()
+            self.activateWindow()
+
+    def _on_host_destroyed(self) -> None:
+        self._is_host_closing = True
+        try:
+            self.close()
+        except RuntimeError:
+            pass
+
+    def eventFilter(self, obj: Any, event: Any) -> bool:
+        if self._host_win is not None and obj == self._host_win:
+            if event.type() == QEvent.Type.Close:
+                self._is_host_closing = True
+                try:
+                    self.close()
+                except RuntimeError:
+                    pass
+        return super().eventFilter(obj, event)
+
+    def closeEvent(self, event: Any) -> None:
+        if self._is_host_closing:
+            event.accept()
+        else:
+            event.ignore()
+            self._editor._dock_tab()
+
 class NodeEditorWidget(QWidget):
     def __init__(
         self,
@@ -3815,6 +4082,10 @@ class NodeEditorWidget(QWidget):
         self.get_app = get_app
         self.on_node_selection_changed = on_node_selection_changed
         self._dock: Optional[Any] = None
+        self._floating_window: Optional[NodeEditorFloatingWindow] = None
+        self._last_floating_geo: Optional[bytes] = None
+        self._placeholder: Optional[QWidget] = None
+        self.current_file_path: Optional[str] = None
 
         self._eval_timer = QTimer(self)
         self._eval_timer.setSingleShot(True)
@@ -3827,40 +4098,369 @@ class NodeEditorWidget(QWidget):
     def minimumSizeHint(self) -> QSize:
         return QSize(200, 150)
 
+    def is_floating(self) -> bool:
+        fw = self._floating_window
+        if fw is None:
+            return False
+        try:
+            return fw.isVisible()
+        except RuntimeError:
+            return False
+
+    def get_main_window(self) -> Optional[Any]:
+        if self._dock is not None:
+            p = self._dock.parent()
+            if p is not None:
+                return p
+        if callable(self.get_app):
+            app = self.get_app()
+            if app is not None:
+                return getattr(app, "_window", None) or getattr(app, "window", None)
+        return None
+
     def set_dock(self, dock: Any) -> None:
         self._dock = dock
-        if hasattr(dock, "topLevelChanged"):
-            dock.topLevelChanged.connect(self._on_dock_toplevel_changed)
-        if hasattr(dock, "isFloating"):
-            self._update_popout_button(dock.isFloating())
+        self._preferred_dock_width: int = 560
+        self._saved_tray_width: Optional[int] = None
+        if dock is not None:
+            # Allow unrestricted resizing of the dock inside IngeTrazo
+            dock.setMinimumWidth(200)
+            dock.setMaximumWidth(16777215)
+            dock.setMinimumHeight(160)
+            dock.setMaximumHeight(16777215)
+            try:
+                from PySide6.QtWidgets import QDockWidget
+                dock.setAllowedAreas(Qt.DockWidgetArea.AllDockWidgetAreas)
+                dock.setFeatures(
+                    QDockWidget.DockWidgetFeature.DockWidgetMovable
+                    | QDockWidget.DockWidgetFeature.DockWidgetFloatable
+                    | QDockWidget.DockWidgetFeature.DockWidgetClosable
+                )
+                dock.visibilityChanged.connect(self._on_dock_visibility_changed)
+            except Exception:
+                pass
+        self._update_popout_button(self.is_floating())
 
-    def _on_dock_toplevel_changed(self, is_floating: bool) -> None:
-        self._update_popout_button(is_floating)
+    def _on_dock_visibility_changed(self, visible: bool) -> None:
+        """
+        Preserves IngeTrazo's normal side-tray width for other tabs while allowing
+        the Node Editor tab to have its own wider resizable width when active.
+        """
+        if self.is_floating() or self._dock is None:
+            return
+        win = self.get_main_window()
+        if win is None or not hasattr(win, "resizeDocks"):
+            return
+        tray = getattr(win, "tray", None)
+        try:
+            if visible:
+                if tray is not None and tray.width() > 100 and self._saved_tray_width is None:
+                    self._saved_tray_width = tray.width()
+                if win.dockWidgetArea(self._dock) in (
+                    Qt.DockWidgetArea.RightDockWidgetArea,
+                    Qt.DockWidgetArea.LeftDockWidgetArea,
+                ):
+                    target_w = max(self._preferred_dock_width, self._dock.width())
+                    QTimer.singleShot(0, lambda: win.resizeDocks([self._dock], [target_w], Qt.Orientation.Horizontal))
+            else:
+                if self._dock.width() > 260:
+                    self._preferred_dock_width = self._dock.width()
+                if tray is not None and self._saved_tray_width:
+                    restore_w = self._saved_tray_width
+                    QTimer.singleShot(0, lambda: win.resizeDocks([tray], [restore_w], Qt.Orientation.Horizontal))
+        except Exception:
+            pass
+
+    def bring_to_front(self) -> None:
+        if self.is_floating():
+            if self._floating_window is not None:
+                self._floating_window.show()
+                self._floating_window.raise_()
+                self._floating_window.activateWindow()
+        elif self._dock is not None:
+            self._dock.show()
+            self._dock.raise_()
+            self._dock.activateWindow()
 
     def _update_popout_button(self, is_floating: bool) -> None:
         if hasattr(self, "btn_popout"):
             self.btn_popout.setText(tr("⇲ Dock Tab") if is_floating else tr("⧉ Pop out"))
             self.btn_popout.setToolTip(
-                tr("Dock back as a side tray tab") if is_floating else tr("Pop out into a separate floating window")
+                tr("Dock back as side tray tab (Right-click for monitor options)") if is_floating
+                else tr("Pop out into movable floating window (multi-monitor support)")
             )
 
+    def _pop_out(self, target_screen_idx: Optional[int] = None) -> None:
+        if self._floating_window is None:
+            self._floating_window = NodeEditorFloatingWindow(self)
+
+        # 1. Swap placeholder into IngeTrazo's dock so IngeTrazo's internal references stay valid
+        if self._dock is not None:
+            if self._placeholder is None:
+                self._placeholder = _DockPlaceholderWidget(self)
+            try:
+                if self._dock.width() > 260:
+                    self._preferred_dock_width = self._dock.width()
+                self._dock.setWidget(self._placeholder)
+                self._dock.hide()
+                # Activate IngeTrazo's main tray tab if available so the side tray isn't blank
+                win = self.get_main_window()
+                tray = getattr(win, "tray", None) if win else None
+                if tray is not None:
+                    tray.raise_()
+            except Exception:
+                pass
+
+        # 2. Attach self to the floating window
+        self._floating_window.setCentralWidget(self)
+        self.show()
+
+        # 3. Restore geometry or place on requested monitor (auto-uses 2nd monitor if requested)
+        screens = QGuiApplication.screens()
+        if target_screen_idx is not None and 0 <= target_screen_idx < len(screens):
+            self._move_floating_to_screen(target_screen_idx)
+        elif self._last_floating_geo:
+            self._floating_window.restoreGeometry(self._last_floating_geo)
+        else:
+            self._floating_window.resize(1180, 720)
+
+        self._floating_window.show()
+        self.show()
+        self._floating_window.raise_()
+        self._floating_window.activateWindow()
+        self._update_popout_button(True)
+
+    def _dock_tab(self, area: Qt.DockWidgetArea = Qt.DockWidgetArea.RightDockWidgetArea, tabify_with_tray: bool = True) -> None:
+        fw = self._floating_window
+        if fw is not None:
+            try:
+                if fw.isVisible():
+                    self._last_floating_geo = fw.saveGeometry()
+                # CRITICAL: takeCentralWidget() detaches `self` WITHOUT calling deleteLater()!
+                if fw.centralWidget() is self:
+                    fw.takeCentralWidget()
+                fw.hide()
+            except (RuntimeError, Exception):
+                pass
+
+        if self._dock is not None:
+            try:
+                self._dock.setWidget(self)
+                self.show()
+
+                win = self.get_main_window()
+                if win is not None:
+                    tray = getattr(win, "tray", None)
+                    if tabify_with_tray and tray is not None:
+                        # Hide dock title bar so it blends seamlessly with IngeTrazo's tray tabs
+                        self._dock.setTitleBarWidget(QWidget(self._dock))
+                        win.addDockWidget(win.dockWidgetArea(tray), self._dock)
+                        win.tabifyDockWidget(tray, self._dock)
+                    else:
+                        # Show native dock title bar when docked to Bottom / Left / Right split
+                        self._dock.setTitleBarWidget(None)
+                        win.addDockWidget(area, self._dock)
+                        if area == Qt.DockWidgetArea.BottomDockWidgetArea and hasattr(win, "resizeDocks"):
+                            QTimer.singleShot(0, lambda: win.resizeDocks([self._dock], [320], Qt.Orientation.Vertical))
+
+                self._dock.setFloating(False)
+                self._dock.show()
+                self._dock.raise_()
+            except Exception:
+                pass
+
+        self._update_popout_button(False)
+
     def _toggle_popout(self) -> None:
-        dock = self._dock
-        if dock is None:
-            p = self.parent()
-            while p is not None:
-                if type(p).__name__ == "QDockWidget" or hasattr(p, "isFloating"):
-                    dock = p
-                    break
-                p = p.parent()
-        if dock is not None and hasattr(dock, "setFloating"):
-            is_float = not dock.isFloating()
-            dock.setFloating(is_float)
-            if is_float:
-                dock.resize(1060, 680)
-                dock.raise_()
-                dock.activateWindow()
-            self._update_popout_button(is_float)
+        if self.is_floating():
+            self._dock_tab()
+        else:
+            self._pop_out()
+
+    def _snap_floating_to_screen_edge(self, side: str) -> None:
+        """Snaps/docks the floating window to Left, Right, Top, or Bottom half of its current monitor."""
+        if not self.is_floating():
+            self._pop_out()
+        fw = self._floating_window
+        if fw is None:
+            return
+        scr = fw.screen() or QGuiApplication.primaryScreen()
+        if scr is None:
+            return
+        avail = scr.availableGeometry()
+        fw.showNormal()
+        if side == "left":
+            fw.setGeometry(avail.x(), avail.y(), avail.width() // 2, avail.height())
+        elif side == "right":
+            w = avail.width() // 2
+            fw.setGeometry(avail.x() + avail.width() - w, avail.y(), w, avail.height())
+        elif side == "top":
+            fw.setGeometry(avail.x(), avail.y(), avail.width(), avail.height() // 2)
+        elif side == "bottom":
+            h = avail.height() // 2
+            fw.setGeometry(avail.x(), avail.y() + avail.height() - h, avail.width(), h)
+        fw.raise_()
+        fw.activateWindow()
+
+    def _show_popout_menu(self, pos: QPoint) -> None:
+        """Displays multi-monitor, screen edge docking, and IngeTrazo dock area options."""
+        menu = QMenu(self)
+        menu.setStyleSheet("""
+            QMenu {
+                background: #21252b;
+                color: #eceff4;
+                border: 1px solid #3b4252;
+                padding: 4px;
+            }
+            QMenu::item {
+                padding: 5px 20px 5px 24px;
+                border-radius: 3px;
+            }
+            QMenu::item:selected {
+                background: #3b4252;
+                color: #61afef;
+            }
+        """)
+
+        is_fl = self.is_floating()
+        act_toggle = menu.addAction(tr("⇲ Dock as Side Tray Tab") if is_fl else tr("⧉ Pop out into Movable Window"))
+        act_toggle.triggered.connect(self._toggle_popout)
+
+        screens = QGuiApplication.screens()
+        if len(screens) > 1:
+            m_menu = menu.addMenu(tr("🖥️ Open / Move to Monitor…"))
+            m_menu.setStyleSheet(menu.styleSheet())
+            curr_screen = self._floating_window.screen() if (is_fl and self._floating_window) else None
+            for idx, scr in enumerate(screens):
+                geo = scr.availableGeometry()
+                scr_title = f"{tr('Monitor')} {idx + 1}: {scr.name()} ({geo.width()}×{geo.height()})"
+                if curr_screen and scr == curr_screen:
+                    scr_title += f" [{tr('Current')}]"
+                a = m_menu.addAction(scr_title)
+                a.triggered.connect(lambda checked=False, s_idx=idx: (
+                    self._move_floating_to_screen(s_idx) if self.is_floating() else self._pop_out(target_screen_idx=s_idx)
+                ))
+
+        # Monitor Edge Snap submenu (works on any OS and any monitor)
+        snap_menu = menu.addMenu(tr("📐 Snap Window to Monitor Edge…"))
+        snap_menu.setStyleSheet(menu.styleSheet())
+        snap_menu.addAction(tr("⬅️ Left Half of Screen"), lambda: self._snap_floating_to_screen_edge("left"))
+        snap_menu.addAction(tr("➡️ Right Half of Screen"), lambda: self._snap_floating_to_screen_edge("right"))
+        snap_menu.addAction(tr("⬆️ Top Half of Screen"), lambda: self._snap_floating_to_screen_edge("top"))
+        snap_menu.addAction(tr("⬇️ Bottom Half of Screen"), lambda: self._snap_floating_to_screen_edge("bottom"))
+
+        # Internal IngeTrazo Dock Area submenu
+        if self._dock is not None:
+            dock_menu = menu.addMenu(tr("⚓ Dock Inside IngeTrazo…"))
+            dock_menu.setStyleSheet(menu.styleSheet())
+            dock_menu.addAction(
+                tr("📑 Side Tray Tab (Default)"),
+                lambda: self._dock_tab(Qt.DockWidgetArea.RightDockWidgetArea, tabify_with_tray=True),
+            )
+            dock_menu.addAction(
+                tr("⬇️ Bottom Panel (Below Viewport)"),
+                lambda: self._dock_tab(Qt.DockWidgetArea.BottomDockWidgetArea, tabify_with_tray=False),
+            )
+            dock_menu.addAction(
+                tr("⬅️ Left Side Panel"),
+                lambda: self._dock_tab(Qt.DockWidgetArea.LeftDockWidgetArea, tabify_with_tray=False),
+            )
+            dock_menu.addAction(
+                tr("➡️ Right Split Panel"),
+                lambda: self._dock_tab(Qt.DockWidgetArea.RightDockWidgetArea, tabify_with_tray=False),
+            )
+
+        if is_fl and self._floating_window is not None:
+            fw = self._floating_window
+            menu.addSeparator()
+            act_pin = menu.addAction(tr("📌 Always on Top"))
+            act_pin.setCheckable(True)
+            act_pin.setChecked(getattr(fw, "_always_on_top", False))
+            act_pin.toggled.connect(fw.set_always_on_top)
+
+            act_center = menu.addAction(tr("🎯 Center on Current Screen"))
+            act_center.triggered.connect(self._center_floating_window)
+
+            act_max = menu.addAction(tr("🗗 Restore Window Size") if fw.isMaximized() else tr("🗖 Maximize Window"))
+            act_max.triggered.connect(self._toggle_maximize_floating_dock)
+
+            act_reset = menu.addAction(tr("↺ Reset Window Size (1180 × 720)"))
+            act_reset.triggered.connect(lambda: fw.resize(1180, 720))
+
+        if hasattr(menu, "exec"):
+            menu.exec(self.btn_popout.mapToGlobal(pos))
+        else:
+            menu.exec_(self.btn_popout.mapToGlobal(pos))
+
+    def _move_floating_to_screen(self, screen_idx: int) -> None:
+        fw = self._floating_window
+        if fw is None:
+            return
+        screens = QGuiApplication.screens()
+        if 0 <= screen_idx < len(screens):
+            scr = screens[screen_idx]
+            avail = scr.availableGeometry()
+            if fw.isMaximized():
+                fw.showNormal()
+            w = min(1200, int(avail.width() * 0.9))
+            h = min(800, int(avail.height() * 0.9))
+            x = avail.x() + (avail.width() - w) // 2
+            y = avail.y() + (avail.height() - h) // 2
+            fw.setGeometry(x, y, w, h)
+            fw.show()
+            fw.raise_()
+            fw.activateWindow()
+
+    def _center_floating_window(self) -> None:
+        fw = self._floating_window
+        if fw is None:
+            return
+        scr = fw.screen() if hasattr(fw, "screen") else None
+        if scr is not None:
+            avail = scr.availableGeometry()
+            if fw.isMaximized():
+                fw.showNormal()
+            w = min(fw.width(), int(avail.width() * 0.95))
+            h = min(fw.height(), int(avail.height() * 0.95))
+            x = avail.x() + (avail.width() - w) // 2
+            y = avail.y() + (avail.height() - h) // 2
+            fw.setGeometry(x, y, w, h)
+            fw.show()
+            fw.raise_()
+            fw.activateWindow()
+
+    def _toggle_maximize_floating_dock(self) -> None:
+        fw = self._floating_window
+        if fw is None:
+            return
+        if fw.isMaximized():
+            fw.showNormal()
+        else:
+            fw.showMaximized()
+
+    def eventFilter(self, obj: Any, event: Any) -> bool:
+        if hasattr(self, "top_bar") and obj == self.top_bar and self.is_floating():
+            fw = self._floating_window
+            if fw is not None:
+                try:
+                    if fw.isVisible():
+                        if event.type() == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
+                            # Use native OS system move so Windows Aero Snap / monitor docking works!
+                            wh = fw.windowHandle()
+                            if wh is not None and hasattr(wh, "startSystemMove"):
+                                wh.startSystemMove()
+                                return True
+                            self._bar_drag_pos = event.globalPosition().toPoint() - fw.frameGeometry().topLeft()
+                        elif event.type() == QEvent.Type.MouseMove and (event.buttons() & Qt.MouseButton.LeftButton) and hasattr(self, "_bar_drag_pos"):
+                            if not fw.isMaximized():
+                                fw.move(event.globalPosition().toPoint() - self._bar_drag_pos)
+                                return True
+                        elif event.type() == QEvent.Type.MouseButtonDblClick and event.button() == Qt.MouseButton.LeftButton:
+                            self._toggle_maximize_floating_dock()
+                            return True
+                except RuntimeError:
+                    pass
+        return super().eventFilter(obj, event)
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
@@ -3868,6 +4468,8 @@ class NodeEditorWidget(QWidget):
         root.setSpacing(0)
 
         bar = QWidget()
+        self.top_bar = bar
+        bar.installEventFilter(self)
         bar.setStyleSheet("""
             QWidget {
                 background: #21252b;
@@ -3909,6 +4511,16 @@ class NodeEditorWidget(QWidget):
             }
         """)
 
+        # File management: Open, Save, Save As placed BEFORE Add
+        self.btn_load = QPushButton("📂")
+        self.btn_load.setToolTip(tr("Open Graph from file (Ctrl+O)"))
+
+        self.btn_save = QPushButton("💾")
+        self.btn_save.setToolTip(tr("Save Graph immediately (Ctrl+S)"))
+
+        self.btn_save_as = QPushButton(tr("💾 As"))
+        self.btn_save_as.setToolTip(tr("Save Graph As... (Ctrl+Shift+S)"))
+
         self.btn_add = QPushButton(tr("➕ Add"))
         self.btn_add.setToolTip(tr("Add Node (Space or Tab)"))
         self.btn_reload = QPushButton("🔄")
@@ -3925,17 +4537,14 @@ class NodeEditorWidget(QWidget):
         self.btn_bake.setToolTip(tr("Bake current solids to IngeTrazo Scene"))
         self.btn_bake.setStyleSheet("background: #2e7d32; color: white; font-weight: bold; border-radius: 4px; padding: 3px 9px;")
 
-        self.btn_save = QPushButton("💾")
-        self.btn_save.setToolTip(tr("Save Graph (.itgraph / .json)"))
-        self.btn_load = QPushButton("📂")
-        self.btn_load.setToolTip(tr("Load Graph from file"))
-
         self.btn_load_group = QPushButton(tr("📥 From Group"))
         self.btn_load_group.setToolTip(tr("Load embedded graph from selected IngeTrazo Group"))
 
         self.btn_popout = QPushButton(tr("⧉ Pop out"))
-        self.btn_popout.setToolTip(tr("Pop out into separate window / Dock as tab"))
+        self.btn_popout.setToolTip(tr("Pop out into movable floating window (multi-monitor support)"))
         self.btn_popout.setStyleSheet("background: #3b4252; color: #61afef; border-radius: 4px; padding: 3px 7px;")
+        self.btn_popout.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.btn_popout.customContextMenuRequested.connect(self._show_popout_menu)
 
         self.btn_fit = QPushButton(tr("🔎 Fit"))
         self.btn_fit.setToolTip(tr("Fit all nodes in view (F)"))
@@ -3944,7 +4553,7 @@ class NodeEditorWidget(QWidget):
         self.btn_minimap = QPushButton(tr("🗺️ Map"))
         self.btn_minimap.setToolTip(tr("Toggle Minimap (navigation overview)"))
         self.btn_minimap.setCheckable(True)
-        self.btn_minimap.setChecked(True)
+        self.btn_minimap.setChecked(False)  # Disabled by default
         self.btn_minimap.setStyleSheet("""
             QPushButton {
                 background: #2c313a;
@@ -3989,7 +4598,7 @@ class NodeEditorWidget(QWidget):
         self.lbl_status.setStyleSheet("color: #98c379; font-size: 11px;")
 
         bar_layout.addWidget(self.btn_ribbon_toggle)
-        for b in (self.btn_add, self.btn_reload, self.btn_custom, self.btn_bake, self.btn_save, self.btn_load, self.btn_load_group):
+        for b in (self.btn_load, self.btn_save, self.btn_save_as, self.btn_add, self.btn_reload, self.btn_custom, self.btn_bake, self.btn_load_group):
             bar_layout.addWidget(b)
         bar_layout.addWidget(self.chk_live)
         bar_layout.addWidget(self.btn_popout)
@@ -4008,6 +4617,7 @@ class NodeEditorWidget(QWidget):
             on_close=lambda: self.btn_minimap.setChecked(False),
             parent=self.view,
         )
+        self.minimap.hide()  # Minimap disabled by default
 
         self.inspector = NodeInspectorPanel(self)
         self.inspector.parent_editor = self
@@ -4030,8 +4640,8 @@ class NodeEditorWidget(QWidget):
         self.splitter.setStretchFactor(1, 0)
         self.splitter.setSizes([1000, 0])
         self.splitter.is_collapsed = True
-        self.splitter.user_collapsed = False
-        self.inspector.show()
+        self.splitter.user_collapsed = True  # Node properties disabled by default
+        self.splitter.collapse_panel()
 
         is_dark = True
         if self.get_app is not None:
@@ -4082,8 +4692,19 @@ class NodeEditorWidget(QWidget):
         self.btn_custom.clicked.connect(self._open_custom_nodes_menu)
         self.chk_live.toggled.connect(self.on_live_toggled)
         self.btn_bake.clicked.connect(lambda: self.on_bake(None))
-        self.btn_save.clicked.connect(self._save_graph)
         self.btn_load.clicked.connect(self._load_graph)
+        self.btn_save.clicked.connect(self._save_graph)
+        self.btn_save_as.clicked.connect(self._save_as_graph)
+
+        try:
+            self.shortcut_save = QShortcut(QKeySequence.StandardKey.Save, self)
+            self.shortcut_save.activated.connect(self._save_graph)
+            self.shortcut_save_as = QShortcut(QKeySequence("Ctrl+Shift+S"), self)
+            self.shortcut_save_as.activated.connect(self._save_as_graph)
+            self.shortcut_open = QShortcut(QKeySequence.StandardKey.Open, self)
+            self.shortcut_open.activated.connect(self._load_graph)
+        except Exception:
+            pass
         self.btn_load_group.clicked.connect(self._handle_load_from_group)
         self.btn_popout.clicked.connect(self._toggle_popout)
         self.btn_fit.clicked.connect(self.view.fit_view)
@@ -4368,8 +4989,13 @@ class NodeEditorWidget(QWidget):
         self.chk_live.setToolTip(tr("Live Viewport Sync (60 FPS)"))
         self.btn_bake.setText(tr("🥐 Bake"))
         self.btn_bake.setToolTip(tr("Bake current solids to IngeTrazo Scene"))
-        self.btn_save.setToolTip(tr("Save Graph (.itgraph / .json)"))
-        self.btn_load.setToolTip(tr("Load Graph from file"))
+        if hasattr(self, "btn_load"):
+            self.btn_load.setToolTip(tr("Open Graph from file (Ctrl+O)"))
+        if hasattr(self, "btn_save"):
+            self.btn_save.setToolTip(tr("Save Graph immediately (Ctrl+S)"))
+        if hasattr(self, "btn_save_as"):
+            self.btn_save_as.setText(tr("💾 As"))
+            self.btn_save_as.setToolTip(tr("Save Graph As... (Ctrl+Shift+S)"))
         self.btn_load_group.setText(tr("📥 From Group"))
         self.btn_load_group.setToolTip(tr("Load embedded graph from selected IngeTrazo Group"))
         self.btn_fit.setText(tr("🔎 Fit"))
@@ -4380,11 +5006,7 @@ class NodeEditorWidget(QWidget):
         if hasattr(self, "minimap") and self.minimap:
             self.minimap.retranslate_ui()
 
-        if hasattr(self, "_dock") and self._dock is not None:
-            self._update_popout_button(self._dock.isFloating() if hasattr(self._dock, "isFloating") else False)
-        else:
-            self.btn_popout.setText(tr("⧉ Pop out"))
-            self.btn_popout.setToolTip(tr("Pop out into separate window / Dock as tab"))
+        self._update_popout_button(self.is_floating())
 
         if self.lbl_status.text() in ("Ready", "Prêt"):
             self.lbl_status.setText(tr("Ready"))
@@ -4399,15 +5021,60 @@ class NodeEditorWidget(QWidget):
             self.scene.retranslate_ui()
 
     def _save_graph(self) -> None:
-        path, _ = QFileDialog.getSaveFileName(self, tr("Save Node Graph"), "", tr("IngeTrazo Graph (*.itgraph *.json)"))
+        """Saves immediately if current_file_path is known, otherwise prompts Save As dialog."""
+        if self.current_file_path:
+            try:
+                self.engine.save_file(self.current_file_path)
+                fname = os.path.basename(self.current_file_path)
+                self.lbl_status.setText(f"{tr('Saved')}: {fname}")
+                self.lbl_status.setStyleSheet("color: #98c379; font-size: 11px;")
+            except Exception as exc:
+                self.lbl_status.setText(f"{tr('Error saving')}: {exc}")
+                self.lbl_status.setStyleSheet("color: #e06c75; font-size: 11px;")
+        else:
+            self._save_as_graph()
+
+    def _save_as_graph(self) -> None:
+        """Always shows save file dialog to choose path, then saves immediately."""
+        default_dir = os.path.dirname(self.current_file_path) if self.current_file_path else ""
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            tr("Save Node Graph As"),
+            default_dir,
+            tr("IngeTrazo Graph (*.itgraph *.json)")
+        )
         if path:
-            self.engine.save_file(path)
+            if not path.endswith(".itgraph") and not path.endswith(".json"):
+                path += ".itgraph"
+            try:
+                self.engine.save_file(path)
+                self.current_file_path = path
+                fname = os.path.basename(path)
+                self.lbl_status.setText(f"{tr('Saved')}: {fname}")
+                self.lbl_status.setStyleSheet("color: #98c379; font-size: 11px;")
+            except Exception as exc:
+                self.lbl_status.setText(f"{tr('Error saving')}: {exc}")
+                self.lbl_status.setStyleSheet("color: #e06c75; font-size: 11px;")
 
     def _load_graph(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(self, tr("Load Node Graph"), "", tr("IngeTrazo Graph (*.itgraph *.json)"))
+        default_dir = os.path.dirname(self.current_file_path) if self.current_file_path else ""
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            tr("Load Node Graph"),
+            default_dir,
+            tr("IngeTrazo Graph (*.itgraph *.json)")
+        )
         if path:
-            self.engine.load_file(path)
-            self.scene.rebuild_from_engine()
+            try:
+                self.engine.load_file(path)
+                self.scene.rebuild_from_engine()
+                self.current_file_path = path
+                fname = os.path.basename(path)
+                self.lbl_status.setText(f"{tr('Loaded')}: {fname}")
+                self.lbl_status.setStyleSheet("color: #98c379; font-size: 11px;")
+            except Exception as exc:
+                self.lbl_status.setText(f"{tr('Error loading')}: {exc}")
+                self.lbl_status.setStyleSheet("color: #e06c75; font-size: 11px;")
 
     def load_default_preset(self) -> None:
         g = self.engine.add_node("vec.grid_2d", pos=(40, 80))

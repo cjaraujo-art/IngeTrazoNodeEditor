@@ -71,8 +71,8 @@ except Exception:
 
 PLUGIN = {
     "name": "IngeTrazo Parametric Node Editor",
-    "version": "1.5.0",
-    "author": "Community",
+    "version": "1.7.0",
+    "author": "seghier",
     "description": "Visual parametric node editor with Blender-style sliders, live viewport sync, and BIM tagging.",
 }
 

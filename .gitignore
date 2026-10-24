@@ -6,3 +6,6 @@ target/
 **/target/
 *.pdb
 icons_sheet.jpg
+list_icons.jpg
+new_nodes.jpg
+scratch/

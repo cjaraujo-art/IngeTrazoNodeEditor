@@ -2,9 +2,10 @@
 """Declarative BaseNode template and global node registry."""
 
 from __future__ import annotations
+import copy
 from dataclasses import dataclass
 import sys
-from typing import Any, Callable, Dict, List, Optional, Type
+from typing import Any, Callable, Dict, List, Optional, Tuple, Type
 import uuid
 
 try:
@@ -27,6 +28,7 @@ class InputSpec:
     choices: Optional[List[str]] = None   # If set on STRING type, renders a QComboBox
     access: AccessMode = AccessMode.ITEM  # ITEM = auto-broadcast lists; LIST = pass raw list
     hide_widget: bool = False             # True for geometry sockets that have no inline editor
+    hide_socket: bool = False             # True for control params that have an inline widget but no socket dot
 
 
 @dataclass
@@ -251,3 +253,84 @@ class BaseNode:
             "custom_title": self.custom_title,
             "slider_configs": slider_configs,
         }
+
+
+# ============================================================================
+# Dynamic Inputs Mixin
+# ============================================================================
+class DynamicInputsMixin:
+    """
+    Mixin for nodes with dynamically expandable and contractible input pins.
+    Supports on-node interactive slider, properties panel scrub/spinbox,
+    and context menu ➕ Add / ➖ Remove pin actions.
+    """
+    is_dynamic_inputs: bool = True
+    min_inputs: int = 2
+    max_inputs: int = 100
+    default_input_count: int = 4
+    input_prefix: str = "item_"
+    input_label_prefix: str = "Item "
+    input_socket_type: SocketType = SocketType.ANY
+
+    def __init__(self, node_id: Optional[str] = None) -> None:
+        super().__init__(node_id=node_id)
+        self._sync_dynamic_inputs()
+
+    def _is_dynamic_pin_id(self, spec_id: str) -> bool:
+        return spec_id.startswith(self.input_prefix)
+
+    def _get_dynamic_pin_id_and_label(self, idx: int) -> Tuple[str, str]:
+        return f"{self.input_prefix}{idx}", f"{self.input_label_prefix}{idx}"
+
+    def _sync_dynamic_inputs(self) -> bool:
+        cur_count = int(self.param_values.get("count", self.default_input_count))
+        cur_count = max(self.min_inputs, min(self.max_inputs, cur_count))
+        self.param_values["count"] = cur_count
+
+        sock_type = getattr(self, "input_socket_type", SocketType.ANY)
+        dynamic_specs: List[InputSpec] = []
+        for i in range(cur_count):
+            pin_id, pin_label = self._get_dynamic_pin_id_and_label(i)
+            dynamic_specs.append(
+                InputSpec(pin_id, pin_label, sock_type, default=[], access=AccessMode.LIST, hide_widget=True)
+            )
+            if pin_id not in self.param_values:
+                self.param_values[pin_id] = []
+
+        new_inputs: List[InputSpec] = []
+        dynamic_inserted = False
+        for spec in self.__class__.inputs:
+            if self._is_dynamic_pin_id(spec.id):
+                if not dynamic_inserted:
+                    new_inputs.extend(dynamic_specs)
+                    dynamic_inserted = True
+            else:
+                new_inputs.append(copy.copy(spec))
+                if spec.id not in self.param_values:
+                    self.param_values[spec.id] = spec.default
+
+        if not dynamic_inserted:
+            new_inputs.extend(dynamic_specs)
+
+        self.inputs = new_inputs
+        self.is_dirty = True
+        return True
+
+    def set_param(self, input_id: str, value: Any) -> None:
+        super().set_param(input_id, value)
+        if input_id == "count":
+            self._sync_dynamic_inputs()
+
+    def add_input(self) -> bool:
+        cur = int(self.param_values.get("count", self.default_input_count))
+        if cur < self.max_inputs:
+            self.set_param("count", cur + 1)
+            return True
+        return False
+
+    def remove_input(self) -> bool:
+        cur = int(self.param_values.get("count", self.default_input_count))
+        if cur > self.min_inputs:
+            self.set_param("count", cur - 1)
+            return True
+        return False

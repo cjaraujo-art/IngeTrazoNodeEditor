@@ -6,11 +6,11 @@ import math
 from typing import Any, Dict, List, Optional, Tuple
 
 try:
-    from ..core_types import AccessMode, CurveData, MeshData, SocketType, Vec3
-    from ..node_base import BaseNode, InputSpec, OutputSpec, register_node
+    from ..core_types import AccessMode, CurveData, MeshData, SocketType, Vec3, extract_plane_frame
+    from ..node_base import BaseNode, DynamicInputsMixin, InputSpec, OutputSpec, register_node, NODE_REGISTRY
 except (ImportError, ValueError):
-    from core_types import AccessMode, CurveData, MeshData, SocketType, Vec3
-    from node_base import BaseNode, InputSpec, OutputSpec, register_node
+    from core_types import AccessMode, CurveData, MeshData, SocketType, Vec3, extract_plane_frame
+    from node_base import BaseNode, DynamicInputsMixin, InputSpec, OutputSpec, register_node, NODE_REGISTRY
 
 
 # ============================================================================
@@ -73,50 +73,96 @@ class RectangleCurveNode(BaseNode):
     type_id = "curve.rectangle"
     title = "Rectangle Curve"
     category = "Curves"
-    description = "Generates a rectangular polyline with optional rounded fillet corners."
+    description = (
+        "Generates a rectangular polyline with optional rounded fillet corners.\n"
+        "Supports drawing from corner or centered on origin/plane, with 3D plane orientation."
+    )
     header_color = (68, 108, 179)
 
     inputs = [
         InputSpec("width", "Width (X)", SocketType.FLOAT, default=6.0, min_val=0.01, step=0.5),
         InputSpec("length", "Length (Y)", SocketType.FLOAT, default=4.0, min_val=0.01, step=0.5),
         InputSpec("fillet", "Fillet Radius", SocketType.FLOAT, default=0.0, min_val=0.0, step=0.1),
-        InputSpec("center", "Center", SocketType.VEC3, default=Vec3(0, 0, 0), hide_widget=True),
+        InputSpec("origin", "Origin / Plane", SocketType.ANY, default=Vec3(0, 0, 0), hide_widget=True),
+        InputSpec("plane", "Plane", SocketType.ANY, default=None, hide_widget=True),
+        InputSpec("centered", "Center", SocketType.BOOL, default=True),
     ]
     outputs = [
         OutputSpec("curve", "Curve", SocketType.CURVE),
         OutputSpec("face", "Face", SocketType.MESH),
     ]
 
-    def compute(self, width: float, length: float, fillet: float, center: Vec3) -> Dict[str, Any]:
+    def compute(
+        self,
+        width: float = 6.0,
+        length: float = 4.0,
+        fillet: float = 0.0,
+        origin: Any = None,
+        centered: Any = True,
+        plane: Any = None,
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
+        # Handle backwards-compatibility and flexible wiring
+        if "center" in kwargs:
+            c_val = kwargs["center"]
+            if isinstance(c_val, bool):
+                centered = c_val
+            elif c_val is not None:
+                origin = c_val
+
+        # If boolean toggle was wired into origin socket
+        if isinstance(origin, bool):
+            centered = origin
+            origin = None
+
+        frame_src = plane if plane is not None else origin
+        p0, u, v, n = extract_plane_frame(frame_src)
+
         w = max(1e-4, float(width))
         l = max(1e-4, float(length))
-        c = center or Vec3()
-        hw, hl = w * 0.5, l * 0.5
-        r = max(0.0, min(float(fillet), hw - 1e-4, hl - 1e-4))
+        is_centered = bool(centered)
 
-        pts: List[Vec3] = []
+        if is_centered:
+            hw, hl = w * 0.5, l * 0.5
+            x_min, x_max = -hw, hw
+            y_min, y_max = -hl, hl
+        else:
+            x_min, x_max = 0.0, w
+            y_min, y_max = 0.0, l
+
+        r = max(0.0, min(float(fillet), (x_max - x_min) * 0.5 - 1e-4, (y_max - y_min) * 0.5 - 1e-4))
+
+        local_pts: List[Tuple[float, float]] = []
         if r < 1e-4:
-            pts = [
-                Vec3(c.x - hw, c.y - hl, c.z),
-                Vec3(c.x + hw, c.y - hl, c.z),
-                Vec3(c.x + hw, c.y + hl, c.z),
-                Vec3(c.x - hw, c.y + hl, c.z),
+            local_pts = [
+                (x_min, y_min),
+                (x_max, y_min),
+                (x_max, y_max),
+                (x_min, y_max),
             ]
         else:
-            # Generate 4 filleted corners CCW
+            # 4 filleted corners CCW: SE, NE, NW, SW
             corners = [
-                (c.x + hw - r, c.y - hl + r, 270.0, 360.0),  # SE
-                (c.x + hw - r, c.y + hl - r, 0.0, 90.0),     # NE
-                (c.x - hw + r, c.y + hl - r, 90.0, 180.0),   # NW
-                (c.x - hw + r, c.y - hl + r, 180.0, 270.0),  # SW
+                (x_max - r, y_min + r, 270.0, 360.0),  # SE
+                (x_max - r, y_max - r, 0.0, 90.0),     # NE
+                (x_min + r, y_max - r, 90.0, 180.0),   # NW
+                (x_min + r, y_min + r, 180.0, 270.0),  # SW
             ]
             segs_per_corner = 6
             for cx, cy, start_deg, end_deg in corners:
                 for s in range(segs_per_corner):
                     ang = math.radians(start_deg + (end_deg - start_deg) * s / segs_per_corner)
-                    pts.append(Vec3(cx + r * math.cos(ang), cy + r * math.sin(ang), c.z))
+                    local_pts.append((cx + r * math.cos(ang), cy + r * math.sin(ang)))
 
-        curve = CurveData(points=pts, closed=True)
+        # Transform local (lx, ly) to 3D world: P = p0 + lx*u + ly*v
+        world_pts: List[Vec3] = []
+        for lx, ly in local_pts:
+            wx = p0.x + lx * u.x + ly * v.x
+            wy = p0.y + lx * u.y + ly * v.y
+            wz = p0.z + lx * u.z + ly * v.z
+            world_pts.append(Vec3(wx, wy, wz))
+
+        curve = CurveData(points=world_pts, closed=True)
         return {
             "curve": curve,
             "face": curve.to_mesh_face("RectangleFace"),
@@ -585,8 +631,8 @@ class DivideCurveNode(BaseNode):
     title = "Divide Curve"
     category = "Curves"
     description = (
-        "Divide a curve or face boundary into equal-length segments, outputting division points, segment curves,\n"
-        "and tangent vectors along the perimeter."
+        "Divide a curve or face boundary into equal-length segments, outputting division points, tangent-aligned planes,\n"
+        "tangent vectors, normal vectors, and segment curves along the perimeter."
     )
     header_color = (68, 108, 179)
 
@@ -597,7 +643,9 @@ class DivideCurveNode(BaseNode):
     ]
     outputs = [
         OutputSpec("points", "Points", SocketType.VEC3),
+        OutputSpec("planes", "Planes", SocketType.ANY),
         OutputSpec("tangents", "Tangents", SocketType.VEC3),
+        OutputSpec("normals", "Normals", SocketType.VEC3),
         OutputSpec("segments", "Segments", SocketType.ANY),
         OutputSpec("params", "Parameters (0-1)", SocketType.FLOAT),
         OutputSpec("curve", "Curve", SocketType.CURVE),
@@ -642,16 +690,27 @@ class DivideCurveNode(BaseNode):
         total_len = cum_lens[-1]
         out_curve = CurveData(points=pts, closed=is_closed)
         if total_len < 1e-9:
+            deg_p = poly_pts[0]
+            deg_plane = {
+                "origin": (deg_p.x, deg_p.y, deg_p.z),
+                "u": (1.0, 0.0, 0.0),
+                "v": (0.0, 1.0, 0.0),
+                "normal": (0.0, 0.0, 1.0),
+            }
             return {
-                "points": [poly_pts[0]],
+                "points": [deg_p],
+                "planes": [deg_plane],
                 "tangents": [Vec3(1.0, 0.0, 0.0)],
+                "normals": [Vec3(0.0, 1.0, 0.0)],
                 "segments": [],
                 "params": [0.0],
                 "curve": out_curve,
             }
 
         div_points: List[Vec3] = []
+        div_planes: List[Dict[str, Any]] = []
         div_tangents: List[Vec3] = []
+        div_normals: List[Vec3] = []
         div_params: List[float] = []
 
         if is_closed:
@@ -676,8 +735,36 @@ class DivideCurveNode(BaseNode):
 
         for d in targets:
             p, t = sample_at(d)
+            u = t.normalized()
+            if u.length() < 1e-6:
+                u = Vec3(1.0, 0.0, 0.0)
+
+            # Upright guide vector
+            if abs(u.z) < 0.95:
+                guide = Vec3(0.0, 0.0, 1.0)
+            else:
+                guide = Vec3(1.0, 0.0, 0.0)
+
+            # Normal vector in horizontal / transverse plane (guide x u)
+            v_raw = guide.cross(u)
+            v = v_raw.normalized()
+            if v.length() < 1e-6:
+                v = Vec3(0.0, 1.0, 0.0)
+
+            # Upright vector normal to plane (u x v)
+            n = u.cross(v).normalized()
+
+            plane_dict = {
+                "origin": (p.x, p.y, p.z),
+                "u": (u.x, u.y, u.z),
+                "v": (v.x, v.y, v.z),
+                "normal": (n.x, n.y, n.z),
+            }
+
             div_points.append(p)
-            div_tangents.append(t)
+            div_planes.append(plane_dict)
+            div_tangents.append(u)
+            div_normals.append(v)
             div_params.append(round(d / total_len, 6))
 
         segments: List[CurveData] = []
@@ -692,7 +779,9 @@ class DivideCurveNode(BaseNode):
 
         return {
             "points": div_points,
+            "planes": div_planes,
             "tangents": div_tangents,
+            "normals": div_normals,
             "segments": segments,
             "params": div_params,
             "curve": out_curve,
@@ -976,3 +1065,332 @@ class OffsetCurveNode(BaseNode):
             "frame": frame_mesh,
             "face": curve_face,
         }
+
+
+# ============================================================================
+# 15. Join Curves Node
+# ============================================================================
+@register_node
+class JoinCurvesNode(BaseNode):
+    type_id = "curve.join"
+    title = "Join Curves"
+    category = "Curves"
+    description = (
+        "Joins a list of contiguous open or closed curves/edges into unified polylines or closed loops.\n"
+        "Connect directly to Curve Select (Curves output), List nodes (Create List, Merge), or multiple curve wires.\n"
+        "Automatically bridges touching endpoints within tolerance and detects closed loops."
+    )
+    header_color = (68, 108, 179)
+
+    inputs = [
+        InputSpec("curves", "Curves List", SocketType.CURVE, default=[], access=AccessMode.LIST, hide_widget=True),
+        InputSpec("tolerance", "Tolerance (m)", SocketType.FLOAT, default=0.001, min_val=0.0001, max_val=1.0, step=0.001),
+        InputSpec("close", "Close Loop", SocketType.BOOL, default=False),
+    ]
+    outputs = [
+        OutputSpec("curve", "Joined Curve", SocketType.CURVE),
+        OutputSpec("curves", "Joined Curves", SocketType.ANY),
+        OutputSpec("closed", "Is Closed", SocketType.BOOL),
+        OutputSpec("length", "Length (m)", SocketType.FLOAT),
+        OutputSpec("count", "Curve Count", SocketType.INT),
+    ]
+
+    @staticmethod
+    def _gather_curves(val: Any, out_list: List[CurveData]) -> None:
+        if val is None:
+            return
+        if isinstance(val, CurveData):
+            out_list.append(val)
+        elif isinstance(val, (list, tuple)):
+            for item in val:
+                JoinCurvesNode._gather_curves(item, out_list)
+        elif isinstance(val, dict) and "points" in val:
+            pts_raw = val.get("points", [])
+            pts = [
+                Vec3(float(p[0]), float(p[1]), float(p[2])) if isinstance(p, (list, tuple)) else p
+                for p in pts_raw
+                if p is not None
+            ]
+            if len(pts) >= 2:
+                out_list.append(CurveData(points=pts, closed=bool(val.get("closed", False))))
+
+    @staticmethod
+    def _chain_curves(curves: List[CurveData], tolerance: float = 0.001, close_loop: bool = False) -> List[CurveData]:
+        segments: List[Tuple[Vec3, Vec3]] = []
+        for c in curves:
+            pts = c.points
+            if len(pts) < 2:
+                continue
+            n_segs = len(pts) if c.closed else len(pts) - 1
+            for i in range(n_segs):
+                p0 = pts[i]
+                p1 = pts[(i + 1) % len(pts)]
+                if p0.distance_to(p1) > 1e-6:
+                    segments.append((p0, p1))
+
+        if not segments:
+            return []
+
+        scale = 1.0 / max(1e-6, tolerance)
+
+        def qkey(p: Vec3) -> Tuple[int, int, int]:
+            return (round(p.x * scale), round(p.y * scale), round(p.z * scale))
+
+        key_to_pt: Dict[Tuple[int, int, int], Vec3] = {}
+        adj: Dict[Tuple[int, int, int], List[Tuple[int, int, int]]] = {}
+        edges_set = set()
+
+        for p0, p1 in segments:
+            k0, k1 = qkey(p0), qkey(p1)
+            if k0 == k1:
+                continue
+            edge_key = (min(k0, k1), max(k0, k1))
+            if edge_key in edges_set:
+                continue
+            edges_set.add(edge_key)
+
+            key_to_pt.setdefault(k0, p0)
+            key_to_pt.setdefault(k1, p1)
+            adj.setdefault(k0, []).append(k1)
+            adj.setdefault(k1, []).append(k0)
+
+        visited_edges = set()
+        result_curves: List[CurveData] = []
+        nodes = list(adj.keys())
+        visited_nodes = set()
+
+        for start_node in nodes:
+            if start_node in visited_nodes:
+                continue
+            comp = []
+            q = [start_node]
+            visited_nodes.add(start_node)
+            while q:
+                curr = q.pop(0)
+                comp.append(curr)
+                for nbr in adj.get(curr, []):
+                    if nbr not in visited_nodes:
+                        visited_nodes.add(nbr)
+                        q.append(nbr)
+
+            deg1 = [k for k in comp if len(adj[k]) == 1]
+            start_k = deg1[0] if deg1 else comp[0]
+
+            curr = start_k
+            path = [curr]
+            while True:
+                nbrs = [n for n in adj[curr] if (min(curr, n), max(curr, n)) not in visited_edges]
+                if not nbrs:
+                    break
+                nxt = nbrs[0]
+                visited_edges.add((min(curr, nxt), max(curr, nxt)))
+                path.append(nxt)
+                curr = nxt
+                if curr == start_k:
+                    break
+
+            pts = [key_to_pt[k] for k in path]
+            if len(pts) >= 2:
+                is_closed = (path[0] == path[-1]) or (pts[0].distance_to(pts[-1]) <= tolerance) or close_loop
+                if is_closed and len(pts) > 2 and (pts[0].distance_to(pts[-1]) <= tolerance):
+                    pts = pts[:-1]
+                result_curves.append(CurveData(points=pts, closed=is_closed))
+
+        return result_curves
+
+    def compute(
+        self,
+        curves: Any = None,
+        tolerance: float = 0.001,
+        close: bool = False,
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
+        tol = float(tolerance)
+        close_loop = bool(close)
+
+        collected: List[CurveData] = []
+        if curves is not None:
+            self._gather_curves(curves, collected)
+        for k, v in kwargs.items():
+            if k not in ("tolerance", "close"):
+                self._gather_curves(v, collected)
+
+        if not collected:
+            fallback = CurveData(points=[Vec3(0, 0, 0), Vec3(1, 0, 0)], closed=False)
+            return {
+                "curve": fallback,
+                "curves": [fallback],
+                "closed": False,
+                "length": 1.0,
+                "count": 0,
+            }
+
+        joined_curves = self._chain_curves(collected, tolerance=tol, close_loop=close_loop)
+        if not joined_curves:
+            joined_curves = collected
+
+        def _curve_length(c: CurveData) -> float:
+            total = 0.0
+            n_segs = len(c.points) if c.closed else len(c.points) - 1
+            for i in range(n_segs):
+                total += c.points[i].distance_to(c.points[(i + 1) % len(c.points)])
+            return total
+
+        primary = max(joined_curves, key=_curve_length)
+        total_len = sum(_curve_length(c) for c in joined_curves)
+
+        return {
+            "curve": primary,
+            "curves": joined_curves,
+            "closed": primary.closed,
+            "length": round(total_len, 4),
+            "count": len(joined_curves),
+        }
+
+
+# ============================================================================
+# Midpoint Node
+# ============================================================================
+@register_node
+class MidpointNode(BaseNode):
+    type_id = "curve.midpoint"
+    title = "Midpoint"
+    category = "Curves"
+    description = (
+        "Calculates the exact 50% length midpoint along a curve, or the midpoint between two points.\n"
+        "Outputs the midpoint position, local tangent vector, and perpendicular alignment plane."
+    )
+    header_color = (68, 108, 179)
+    icon = "point.midpoint.png"
+
+    inputs = [
+        InputSpec("curve", "Curve / Point A", SocketType.ANY, default=None, hide_widget=True),
+        InputSpec("point_b", "Point B", SocketType.VEC3, default=None, hide_widget=True),
+    ]
+    outputs = [
+        OutputSpec("point", "Midpoint", SocketType.VEC3),
+        OutputSpec("points", "Points", SocketType.ANY),
+        OutputSpec("tangent", "Tangent", SocketType.VEC3),
+        OutputSpec("plane", "Plane", SocketType.ANY),
+    ]
+
+    def compute(self, curve: Any = None, point_b: Any = None) -> Dict[str, Any]:
+        if isinstance(point_b, Vec3) or (isinstance(curve, Vec3) and point_b is not None):
+            pA = curve if isinstance(curve, Vec3) else Vec3(0, 0, 0)
+            pB = point_b if isinstance(point_b, Vec3) else Vec3(0, 0, 0)
+            mid = (pA + pB) * 0.5
+            diff = pB - pA
+            length = diff.length()
+            tangent = diff * (1.0 / length) if length > 1e-7 else Vec3(1, 0, 0)
+
+            guide = Vec3(0, 0, 1) if abs(tangent.z) < 0.9 else Vec3(0, 1, 0)
+            n_raw = Vec3(
+                tangent.y * guide.z - tangent.z * guide.y,
+                tangent.z * guide.x - tangent.x * guide.z,
+                tangent.x * guide.y - tangent.y * guide.x,
+            )
+            n_len = n_raw.length()
+            norm = n_raw * (1.0 / n_len) if n_len > 1e-7 else Vec3(0, 0, 1)
+            u = tangent
+            v = Vec3(
+                norm.y * u.z - norm.z * u.y,
+                norm.z * u.x - norm.x * u.z,
+                norm.x * u.y - norm.y * u.x,
+            )
+
+            plane_dict = {
+                "origin": (mid.x, mid.y, mid.z),
+                "normal": (tangent.x, tangent.y, tangent.z),
+                "u_axis": (norm.x, norm.y, norm.z),
+                "v_axis": (v.x, v.y, v.z),
+            }
+            return {
+                "point": mid,
+                "points": [mid],
+                "tangent": tangent,
+                "plane": plane_dict,
+            }
+
+        def _mid_curve(c: CurveData) -> Tuple[Vec3, Vec3, Dict[str, Any]]:
+            pts = list(c.points)
+            if not pts:
+                p0 = Vec3(0, 0, 0)
+                return p0, Vec3(1, 0, 0), {"origin": (0, 0, 0), "normal": (0, 0, 1), "u_axis": (1, 0, 0), "v_axis": (0, 1, 0)}
+
+            if len(pts) == 1:
+                p0 = pts[0]
+                return p0, Vec3(1, 0, 0), {"origin": (p0.x, p0.y, p0.z), "normal": (0, 0, 1), "u_axis": (1, 0, 0), "v_axis": (0, 1, 0)}
+
+            if c.closed and (pts[-1] - pts[0]).length() > 1e-6:
+                pts.append(pts[0])
+
+            seg_lens = []
+            total_len = 0.0
+            for i in range(len(pts) - 1):
+                sl = (pts[i + 1] - pts[i]).length()
+                seg_lens.append(sl)
+                total_len += sl
+
+            if total_len < 1e-8:
+                p0 = pts[0]
+                return p0, Vec3(1, 0, 0), {"origin": (p0.x, p0.y, p0.z), "normal": (0, 0, 1), "u_axis": (1, 0, 0), "v_axis": (0, 1, 0)}
+
+            target_len = total_len * 0.5
+            accum = 0.0
+            mid_pt = pts[-1]
+            tan_vec = Vec3(1, 0, 0)
+
+            for i, sl in enumerate(seg_lens):
+                if accum + sl >= target_len - 1e-8:
+                    sub_t = (target_len - accum) / sl if sl > 1e-8 else 0.0
+                    sub_t = max(0.0, min(1.0, sub_t))
+                    mid_pt = pts[i] + (pts[i + 1] - pts[i]) * sub_t
+                    diff = pts[i + 1] - pts[i]
+                    tan_vec = diff * (1.0 / sl) if sl > 1e-8 else Vec3(1, 0, 0)
+                    break
+                accum += sl
+
+            guide = Vec3(0, 0, 1) if abs(tan_vec.z) < 0.9 else Vec3(0, 1, 0)
+            n_raw = Vec3(
+                tan_vec.y * guide.z - tan_vec.z * guide.y,
+                tan_vec.z * guide.x - tan_vec.x * guide.z,
+                tan_vec.x * guide.y - tan_vec.y * guide.x,
+            )
+            n_len = n_raw.length()
+            norm = n_raw * (1.0 / n_len) if n_len > 1e-7 else Vec3(0, 0, 1)
+            u = tan_vec
+            v = Vec3(
+                norm.y * u.z - norm.z * u.y,
+                norm.z * u.x - norm.x * u.z,
+                norm.x * u.y - norm.y * u.x,
+            )
+
+            plane_dict = {
+                "origin": (mid_pt.x, mid_pt.y, mid_pt.z),
+                "normal": (tan_vec.x, tan_vec.y, tan_vec.z),
+                "u_axis": (norm.x, norm.y, norm.z),
+                "v_axis": (v.x, v.y, v.z),
+            }
+            return mid_pt, tan_vec, plane_dict
+
+        if isinstance(curve, list) and curve and isinstance(curve[0], CurveData):
+            mids = [_mid_curve(c) for c in curve]
+            return {
+                "point": mids[0][0],
+                "points": [m[0] for m in mids],
+                "tangent": mids[0][1],
+                "plane": mids[0][2],
+            }
+
+        if not isinstance(curve, CurveData):
+            curve = CurveData(points=[Vec3(0, 0, 0), Vec3(2, 0, 0)], closed=False)
+
+        mid_pt, tan_vec, pl = _mid_curve(curve)
+        return {
+            "point": mid_pt,
+            "points": [mid_pt],
+            "tangent": tan_vec,
+            "plane": pl,
+        }
+
+NODE_REGISTRY["point.midpoint"] = MidpointNode

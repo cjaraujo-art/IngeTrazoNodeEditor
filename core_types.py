@@ -56,6 +56,10 @@ class Vec3:
     def __mul__(self, s: float) -> Vec3:
         return Vec3(self.x * s, self.y * s, self.z * s)
 
+    def __truediv__(self, s: float) -> Vec3:
+        inv = 1.0 / float(s) if abs(s) > 1e-12 else 0.0
+        return Vec3(self.x * inv, self.y * inv, self.z * inv)
+
     def dot(self, o: Vec3) -> float:
         return self.x * o.x + self.y * o.y + self.z * o.z
 
@@ -78,6 +82,51 @@ class Vec3:
 
     def to_tuple(self) -> Tuple[float, float, float]:
         return (float(self.x), float(self.y), float(self.z))
+
+def extract_plane_frame(plane_or_origin: Any) -> Tuple[Vec3, Vec3, Vec3, Vec3]:
+    """
+    Extracts (origin, u_axis, v_axis, normal) from a plane dict, object, or Vec3.
+    Defaults to World XY plane (origin, (1,0,0), (0,1,0), (0,0,1)).
+    """
+    if isinstance(plane_or_origin, dict):
+        orig_val = plane_or_origin.get("origin")
+        if isinstance(orig_val, Vec3):
+            p0 = orig_val
+        elif isinstance(orig_val, (tuple, list)) and len(orig_val) >= 3:
+            p0 = Vec3(float(orig_val[0]), float(orig_val[1]), float(orig_val[2]))
+        elif "x" in plane_or_origin:
+            p0 = Vec3(float(plane_or_origin.get("x", 0.0)), float(plane_or_origin.get("y", 0.0)), float(plane_or_origin.get("z", 0.0)))
+        else:
+            p0 = Vec3(0.0, 0.0, 0.0)
+
+        def _to_v3(k: str, default: Vec3) -> Vec3:
+            v = plane_or_origin.get(k)
+            if isinstance(v, Vec3):
+                return v
+            if isinstance(v, (tuple, list)) and len(v) >= 3:
+                return Vec3(float(v[0]), float(v[1]), float(v[2]))
+            return default
+
+        u = _to_v3("u", _to_v3("u_axis", Vec3(1.0, 0.0, 0.0)))
+        v = _to_v3("v", _to_v3("v_axis", Vec3(0.0, 1.0, 0.0)))
+        n = _to_v3("normal", _to_v3("n", Vec3(0.0, 0.0, 1.0)))
+
+        u_len = u.length()
+        u = u * (1.0 / u_len) if u_len > 1e-6 else Vec3(1.0, 0.0, 0.0)
+        v_len = v.length()
+        v = v * (1.0 / v_len) if v_len > 1e-6 else Vec3(0.0, 1.0, 0.0)
+        n_len = n.length()
+        n = n * (1.0 / n_len) if n_len > 1e-6 else Vec3(0.0, 0.0, 1.0)
+        return p0, u, v, n
+
+    elif isinstance(plane_or_origin, Vec3):
+        return plane_or_origin, Vec3(1.0, 0.0, 0.0), Vec3(0.0, 1.0, 0.0), Vec3(0.0, 0.0, 1.0)
+    elif isinstance(plane_or_origin, (tuple, list)) and len(plane_or_origin) >= 3:
+        p0 = Vec3(float(plane_or_origin[0]), float(plane_or_origin[1]), float(plane_or_origin[2]))
+        return p0, Vec3(1.0, 0.0, 0.0), Vec3(0.0, 1.0, 0.0), Vec3(0.0, 0.0, 1.0)
+    else:
+        return Vec3(0.0, 0.0, 0.0), Vec3(1.0, 0.0, 0.0), Vec3(0.0, 1.0, 0.0), Vec3(0.0, 0.0, 1.0)
+
 
 
 @dataclass
@@ -326,18 +375,60 @@ class MeshData:
         return result
 
     @staticmethod
-    def create_box(origin: Vec3, dx: float, dy: float, dz: float) -> MeshData:
-        """Creates a watertight 6-face rectangular solid with outward CCW normals."""
-        x0, y0, z0 = origin.x, origin.y, origin.z
-        x1, y1, z1 = x0 + dx, y0 + dy, z0 + dz
+    def create_box(
+        origin: Any = None,
+        dx: float = 1.0,
+        dy: float = 1.0,
+        dz: float = 1.0,
+        centered: bool = False,
+        center_z: bool = False,
+        plane: Any = None,
+    ) -> MeshData:
+        """
+        Creates a watertight 6-face rectangular solid with outward CCW normals.
+        Supports world axis alignment or arbitrary plane orientation, and
+        centering in XY or XYZ.
+        """
+        frame_src = plane if plane is not None else origin
+        p0, u, v, n = extract_plane_frame(frame_src)
+
+        dx = float(dx)
+        dy = float(dy)
+        dz = float(dz)
+
+        # Local coordinate bounds
+        if centered:
+            hx = abs(dx) * 0.5
+            hy = abs(dy) * 0.5
+            x0, x1 = -hx, hx
+            y0, y1 = -hy, hy
+        else:
+            x0, x1 = 0.0, dx
+            y0, y1 = 0.0, dy
+
+        if center_z:
+            hz = abs(dz) * 0.5
+            z0, z1 = -hz, hz
+        else:
+            z0, z1 = 0.0, dz
+
         if x0 > x1: x0, x1 = x1, x0
         if y0 > y1: y0, y1 = y1, y0
         if z0 > z1: z0, z1 = z1, z0
 
-        verts = [
+        local_verts = [
             (x0, y0, z0), (x1, y0, z0), (x1, y1, z0), (x0, y1, z0),  # 0..3 bottom
             (x0, y0, z1), (x1, y0, z1), (x1, y1, z1), (x0, y1, z1),  # 4..7 top
         ]
+
+        # Transform to world coordinates: P = p0 + x'*u + y'*v + z'*n
+        verts: List[Tuple[float, float, float]] = []
+        for lx, ly, lz in local_verts:
+            wx = p0.x + lx * u.x + ly * v.x + lz * n.x
+            wy = p0.y + lx * u.y + ly * v.y + lz * n.y
+            wz = p0.z + lx * u.z + ly * v.z + lz * n.z
+            verts.append((wx, wy, wz))
+
         faces = [
             [0, 3, 2, 1],  # Bottom (-Z)
             [4, 5, 6, 7],  # Top (+Z)
@@ -881,11 +972,19 @@ def coerce_value(val: Any, target: SocketType) -> Any:
         if target == SocketType.VEC3:
             if isinstance(val, Vec3):
                 return val
+            if isinstance(val, bool):
+                return Vec3(0.0, 0.0, 0.0)
             if isinstance(val, dict):
+                if "origin" in val:
+                    orig = val["origin"]
+                    if isinstance(orig, Vec3):
+                        return orig
+                    if isinstance(orig, (tuple, list)) and len(orig) >= 3:
+                        return Vec3(float(orig[0]), float(orig[1]), float(orig[2]))
                 return Vec3(float(val.get("x", 0.0)), float(val.get("y", 0.0)), float(val.get("z", 0.0)))
             if isinstance(val, (tuple, list)) and len(val) >= 3:
                 return Vec3(float(val[0]), float(val[1]), float(val[2]))
-            if isinstance(val, (int, float)):
+            if not isinstance(val, bool) and isinstance(val, (int, float)):
                 return Vec3(float(val), float(val), float(val))
         if target == SocketType.CURVE:
             if isinstance(val, CurveData):
