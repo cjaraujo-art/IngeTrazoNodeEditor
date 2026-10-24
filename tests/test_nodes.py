@@ -1826,6 +1826,45 @@ class TestCanvasMinimap(unittest.TestCase):
         self.assertAlmostEqual(pt_minimap.x(), 50.0, delta=2.0)
         self.assertAlmostEqual(pt_minimap.y(), 50.0, delta=2.0)
 
+    def test_minimap_drag_and_zoom_stability(self):
+        """Verifies that dragging the minimap and zooming with mouse wheel does NOT snap back."""
+        from PySide6.QtWidgets import QApplication
+        from PySide6.QtCore import QPointF, QPoint, Qt
+        from PySide6.QtGui import QWheelEvent
+        from ui_canvas import NodeEditorWidget
+        from engine import GraphEngine
+
+        app = QApplication.instance() or QApplication([])
+        engine = GraphEngine()
+        editor = NodeEditorWidget(engine=engine, on_bake=lambda x: None, on_live_toggled=lambda x: None)
+        editor.resize(800, 600)
+        editor.show()
+        app.processEvents()
+
+        # Paint minimap to ensure scale and offsets are computed
+        editor.minimap.canvas.paintEvent(None)
+
+        # Navigate minimap by simulating mouse drag to (200, 150)
+        drag_pos = QPointF(200.0, 150.0)
+        editor.minimap.canvas.navigate_to(drag_pos)
+        app.processEvents()
+
+        center_after_drag = editor.view.mapToScene(editor.view.viewport().rect().center())
+
+        # Perform 5 wheel zooms on the minimap
+        for _ in range(5):
+            wheel_ev = QWheelEvent(
+                drag_pos, drag_pos, QPoint(0, 0), QPoint(0, 120),
+                Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier,
+                Qt.ScrollPhase.NoScrollPhase, False
+            )
+            editor.minimap.canvas.wheelEvent(wheel_ev)
+            app.processEvents()
+
+        center_after_zoom = editor.view.mapToScene(editor.view.viewport().rect().center())
+        dist = (center_after_zoom - center_after_drag).manhattanLength()
+        self.assertLess(dist, 3.0, f"View center snapped or drifted after zoom! dist={dist}")
+
 
 if __name__ == "__main__":
     unittest.main()

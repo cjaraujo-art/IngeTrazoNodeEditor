@@ -3423,6 +3423,8 @@ class MinimapCanvas(QWidget):
         super().__init__(parent)
         self.canvas_view = canvas_view
         self._is_dragging = False
+        self._drag_offset_x: float = 0.0
+        self._drag_offset_y: float = 0.0
         self.scale: float = 1.0
         self.world_min_x: float = 0.0
         self.world_min_y: float = 0.0
@@ -3430,6 +3432,19 @@ class MinimapCanvas(QWidget):
         self.offset_y: float = 0.0
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+
+    def get_viewport_rect(self) -> QRectF:
+        """Returns the viewport bounding rectangle on the minimap."""
+        if self.scale <= 0:
+            return QRectF()
+        vp = self.canvas_view.viewport()
+        v_tl = self.canvas_view.mapToScene(QPoint(0, 0))
+        v_br = self.canvas_view.mapToScene(QPoint(vp.width(), vp.height()))
+        v_left = (min(v_tl.x(), v_br.x()) - self.world_min_x) * self.scale + self.offset_x
+        v_top = (min(v_tl.y(), v_br.y()) - self.world_min_y) * self.scale + self.offset_y
+        v_w = max(4.0, abs(v_br.x() - v_tl.x()) * self.scale)
+        v_h = max(4.0, abs(v_br.y() - v_tl.y()) * self.scale)
+        return QRectF(v_left, v_top, v_w, v_h)
 
     def navigate_to(self, m_pos: QPointF) -> None:
         """Map mouse point on minimap directly to scene coords and center canvas."""
@@ -3447,12 +3462,23 @@ class MinimapCanvas(QWidget):
         if event.button() == Qt.MouseButton.LeftButton:
             self._is_dragging = True
             self.grabMouse()
-            self.navigate_to(event.position())
+            pos = event.position()
+            vp_r = self.get_viewport_rect()
+            if vp_r.isValid() and vp_r.contains(pos):
+                center_pt = vp_r.center()
+                self._drag_offset_x = pos.x() - center_pt.x()
+                self._drag_offset_y = pos.y() - center_pt.y()
+            else:
+                self._drag_offset_x = 0.0
+                self._drag_offset_y = 0.0
+                self.navigate_to(pos)
             event.accept()
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
         if self._is_dragging and (event.buttons() & Qt.MouseButton.LeftButton):
-            self.navigate_to(event.position())
+            pos = event.position()
+            target_pos = QPointF(pos.x() - self._drag_offset_x, pos.y() - self._drag_offset_y)
+            self.navigate_to(target_pos)
             event.accept()
         else:
             super().mouseMoveEvent(event)
@@ -3460,13 +3486,27 @@ class MinimapCanvas(QWidget):
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
             self._is_dragging = False
+            self._drag_offset_x = 0.0
+            self._drag_offset_y = 0.0
             self.releaseMouse()
             event.accept()
         else:
             super().mouseReleaseEvent(event)
 
     def wheelEvent(self, event: QWheelEvent) -> None:
-        self.canvas_view.wheelEvent(event)
+        delta = event.angleDelta().y() or event.angleDelta().x()
+        if delta == 0:
+            event.ignore()
+            return
+        factor = 1.15 if delta > 0 else 1.0 / 1.15
+        curr_scale = self.canvas_view.transform().m11()
+        if (0.2 <= curr_scale <= 3.0) or (curr_scale < 0.2 and factor > 1) or (curr_scale > 3.0 and factor < 1):
+            if hasattr(self.canvas_view, "_grow_scene_rect"):
+                self.canvas_view._grow_scene_rect()
+            old_anchor = self.canvas_view.transformationAnchor()
+            self.canvas_view.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorViewCenter)
+            self.canvas_view.scale(factor, factor)
+            self.canvas_view.setTransformationAnchor(old_anchor)
         self.update()
         event.accept()
 
@@ -3576,19 +3616,11 @@ class MinimapCanvas(QWidget):
                 continue
 
         # 3. Draw Viewport outline box (White stroke + translucent fill, 1:1 with NodeEditorLatest)
-        vp = self.canvas_view.viewport()
-        v_tl = self.canvas_view.mapToScene(QPoint(0, 0))
-        v_br = self.canvas_view.mapToScene(QPoint(vp.width(), vp.height()))
-
-        v_left = (min(v_tl.x(), v_br.x()) - min_x) * scale + ox
-        v_top = (min(v_tl.y(), v_br.y()) - min_y) * scale + oy
-        v_w = max(4.0, abs(v_br.x() - v_tl.x()) * scale)
-        v_h = max(4.0, abs(v_br.y() - v_tl.y()) * scale)
-        vp_r = QRectF(v_left, v_top, v_w, v_h)
-
-        painter.setPen(QPen(QColor(255, 255, 255, 230), 1.5))
-        painter.setBrush(QBrush(QColor(255, 255, 255, 30)))
-        painter.drawRoundedRect(vp_r, 2.0, 2.0)
+        vp_r = self.get_viewport_rect()
+        if vp_r.isValid():
+            painter.setPen(QPen(QColor(255, 255, 255, 230), 1.5))
+            painter.setBrush(QBrush(QColor(255, 255, 255, 30)))
+            painter.drawRoundedRect(vp_r, 2.0, 2.0)
 
         painter.end()
 
@@ -3748,8 +3780,10 @@ class CanvasMinimap(QFrame):
         return QPointF(mx, my)
 
     def wheelEvent(self, event: QWheelEvent) -> None:
-        # Forward zoom events to canvas view
-        self.canvas_view.wheelEvent(event)
+        if hasattr(self, "canvas") and self.canvas:
+            self.canvas.wheelEvent(event)
+        else:
+            event.ignore()
 
     # ── Resize follow ───────────────────────────────────────────────────
     def resizeEvent(self, event: Any) -> None:
