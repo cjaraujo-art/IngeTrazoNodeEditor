@@ -9,3 +9,5 @@ icons_sheet.jpg
 list_icons.jpg
 new_nodes.jpg
 scratch/
+tests/
+build_zip.py

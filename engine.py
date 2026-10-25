@@ -66,6 +66,12 @@ class GraphEngine:
     def remove_node(self, node_id: str) -> None:
         if node_id not in self.nodes:
             return
+        node = self.nodes[node_id]
+        if hasattr(node, "on_destroy") and callable(node.on_destroy):
+            try:
+                node.on_destroy()
+            except Exception:
+                pass
         for w in self.wires:
             if w.src_node == node_id:
                 self.mark_dirty(w.dst_node)
@@ -341,6 +347,10 @@ class GraphEngine:
             for out_spec in node.outputs:
                 if (node.id, out_spec.id) in active_output_sources:
                     continue
+                if getattr(out_spec, "hide_preview", False):
+                    continue
+                if out_spec.id.lower() in ("tangents", "tangent", "normals", "normal"):
+                    continue
                 val = node.cached_outputs.get(out_spec.id)
                 _extract_preview(val, default_name=node.title or out_spec.label, source_node_id=node.id)
 
@@ -465,6 +475,12 @@ class GraphEngine:
         }
 
     def load_dict(self, data: Dict[str, Any]) -> None:
+        for n in list(self.nodes.values()):
+            if hasattr(n, "on_destroy") and callable(n.on_destroy):
+                try:
+                    n.on_destroy()
+                except Exception:
+                    pass
         self.nodes.clear()
         self.wires.clear()
         for nd in data.get("nodes", []):

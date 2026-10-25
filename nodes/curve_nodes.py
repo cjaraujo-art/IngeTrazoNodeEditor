@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 import math
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 try:
     from ..core_types import AccessMode, CurveData, MeshData, SocketType, Vec3, extract_plane_frame
@@ -187,6 +187,7 @@ class EllipseCurveNode(BaseNode):
         InputSpec("center", "Center", SocketType.VEC3, default=Vec3(0, 0, 0), hide_widget=True),
     ]
     outputs = [
+        OutputSpec("curve", "Curve", SocketType.CURVE),
         OutputSpec("face", "Face", SocketType.MESH),
     ]
 
@@ -200,7 +201,10 @@ class EllipseCurveNode(BaseNode):
             ang = 2.0 * math.pi * i / n
             pts.append(Vec3(c.x + rx * math.cos(ang), c.y + ry * math.sin(ang), c.z))
         curve = CurveData(points=pts, closed=True)
-        return {"face": curve.to_mesh_face("EllipseFace")}
+        return {
+            "curve": curve,
+            "face": curve.to_mesh_face("EllipseFace"),
+        }
 
 
 # ============================================================================
@@ -220,6 +224,7 @@ class RegularPolygonCurveNode(BaseNode):
         InputSpec("center", "Center", SocketType.VEC3, default=Vec3(0, 0, 0), hide_widget=True),
     ]
     outputs = [
+        OutputSpec("curve", "Curve", SocketType.CURVE),
         OutputSpec("face", "Face", SocketType.MESH),
     ]
 
@@ -232,7 +237,10 @@ class RegularPolygonCurveNode(BaseNode):
             ang = 2.0 * math.pi * i / s
             pts.append(Vec3(c.x + r * math.cos(ang), c.y + r * math.sin(ang), c.z))
         curve = CurveData(points=pts, closed=True)
-        return {"face": curve.to_mesh_face("PolygonFace")}
+        return {
+            "curve": curve,
+            "face": curve.to_mesh_face("PolygonFace"),
+        }
 
 
 # ============================================================================
@@ -253,6 +261,7 @@ class StarCurveNode(BaseNode):
         InputSpec("center", "Center", SocketType.VEC3, default=Vec3(0, 0, 0), hide_widget=True),
     ]
     outputs = [
+        OutputSpec("curve", "Curve", SocketType.CURVE),
         OutputSpec("face", "Face", SocketType.MESH),
     ]
 
@@ -267,7 +276,10 @@ class StarCurveNode(BaseNode):
             r = r_out if (i % 2 == 0) else r_in
             pts.append(Vec3(c.x + r * math.cos(ang), c.y + r * math.sin(ang), c.z))
         curve = CurveData(points=pts, closed=True)
-        return {"face": curve.to_mesh_face("StarFace")}
+        return {
+            "curve": curve,
+            "face": curve.to_mesh_face("StarFace"),
+        }
 
 
 # ============================================================================
@@ -287,6 +299,7 @@ class SlotCapsuleCurveNode(BaseNode):
         InputSpec("center", "Center", SocketType.VEC3, default=Vec3(0, 0, 0), hide_widget=True),
     ]
     outputs = [
+        OutputSpec("curve", "Curve", SocketType.CURVE),
         OutputSpec("face", "Face", SocketType.MESH),
     ]
 
@@ -309,7 +322,10 @@ class SlotCapsuleCurveNode(BaseNode):
             pts.append(Vec3(c.x - d + r * math.cos(ang), c.y + r * math.sin(ang), c.z))
 
         curve = CurveData(points=pts, closed=True)
-        return {"face": curve.to_mesh_face("SlotFace")}
+        return {
+            "curve": curve,
+            "face": curve.to_mesh_face("SlotFace"),
+        }
 
 
 # ============================================================================
@@ -331,6 +347,7 @@ class LShapeCurveNode(BaseNode):
         InputSpec("center", "Center", SocketType.VEC3, default=Vec3(0, 0, 0), hide_widget=True),
     ]
     outputs = [
+        OutputSpec("curve", "Curve", SocketType.CURVE),
         OutputSpec("face", "Face", SocketType.MESH),
     ]
 
@@ -350,7 +367,10 @@ class LShapeCurveNode(BaseNode):
             Vec3(c.x, c.y + l, c.z),
         ]
         curve = CurveData(points=pts, closed=True)
-        return {"face": curve.to_mesh_face("LShapeFace")}
+        return {
+            "curve": curve,
+            "face": curve.to_mesh_face("LShapeFace"),
+        }
 
 
 # ============================================================================
@@ -372,6 +392,7 @@ class IShapeCurveNode(BaseNode):
         InputSpec("center", "Center", SocketType.VEC3, default=Vec3(0, 0, 0), hide_widget=True),
     ]
     outputs = [
+        OutputSpec("curve", "Curve", SocketType.CURVE),
         OutputSpec("face", "Face", SocketType.MESH),
     ]
 
@@ -401,7 +422,10 @@ class IShapeCurveNode(BaseNode):
             Vec3(c.x - hw, c.y - hh + tf, c.z),
         ]
         curve = CurveData(points=pts, closed=True)
-        return {"face": curve.to_mesh_face("IBeamFace")}
+        return {
+            "curve": curve,
+            "face": curve.to_mesh_face("IBeamFace"),
+        }
 
 
 # ============================================================================
@@ -514,6 +538,185 @@ class FaceFromPointsNode(BaseNode):
         outer_curve = CurveData(points=outer, closed=True)
         face_mesh = outer_curve.to_mesh_face("PlanarPolygonFace")
         return {"face": face_mesh}
+
+
+# ============================================================================
+# 11b. Face Outline Node (Extract Outline / Boundary Curves from Face)
+# ============================================================================
+@register_node
+class FaceOutlineNode(BaseNode):
+    type_id = "curve.face_outline"
+    title = "Face Outline"
+    category = "Curves"
+    description = (
+        "Extracts closed boundary outline curve(s) from any input face, surface, or planar mesh.\n"
+        "Outputs the outer perimeter curve, interior hole loops, and ordered boundary vertices."
+    )
+    header_color = (68, 108, 179)
+
+    inputs = [
+        InputSpec("face", "Face / Surface", SocketType.ANY, default=None, hide_widget=True),
+    ]
+    outputs = [
+        OutputSpec("curve", "Outline Curve", SocketType.CURVE),
+        OutputSpec("holes", "Holes", SocketType.CURVE),
+        OutputSpec("points", "Points", SocketType.VEC3),
+        OutputSpec("count", "Count", SocketType.INT),
+    ]
+
+    def compute(self, face: Any = None) -> Dict[str, Any]:
+        if face is None:
+            d_pts = [Vec3(0, 0, 0), Vec3(1, 0, 0), Vec3(1, 1, 0), Vec3(0, 1, 0)]
+            d_c = CurveData(points=d_pts, closed=True)
+            return {"curve": d_c, "holes": [], "points": d_pts, "count": 4}
+
+        if isinstance(face, CurveData):
+            return {
+                "curve": face,
+                "holes": [],
+                "points": list(face.points),
+                "count": len(face.points),
+            }
+
+        if isinstance(face, dict):
+            if "outer" in face:
+                raw_outer = face["outer"]
+                if isinstance(raw_outer, CurveData):
+                    outer_c = raw_outer
+                else:
+                    outer_pts = [p if isinstance(p, Vec3) else Vec3(float(p[0]), float(p[1]), float(p[2])) for p in raw_outer]
+                    outer_c = CurveData(points=outer_pts, closed=True)
+                raw_holes = face.get("holes", [])
+                hole_curves = []
+                for h in raw_holes:
+                    if isinstance(h, CurveData):
+                        hole_curves.append(h)
+                    elif isinstance(h, list) and h:
+                        h_pts = [p if isinstance(p, Vec3) else Vec3(float(p[0]), float(p[1]), float(p[2])) for p in h]
+                        hole_curves.append(CurveData(points=h_pts, closed=True))
+                return {
+                    "curve": outer_c,
+                    "holes": hole_curves,
+                    "points": list(outer_c.points),
+                    "count": len(outer_c.points),
+                }
+            if "curve" in face and isinstance(face["curve"], CurveData):
+                return {
+                    "curve": face["curve"],
+                    "holes": face.get("holes", []),
+                    "points": list(face["curve"].points),
+                    "count": len(face["curve"].points),
+                }
+            if "face" in face:
+                return self.compute(face["face"])
+            if "mesh" in face:
+                return self.compute(face["mesh"])
+
+        # Handle IngeTrazo native Face or Group objects
+        if hasattr(face, "outer_loop"):
+            loop_pts = []
+            try:
+                for v in getattr(face.outer_loop, "vertices", []):
+                    pos = getattr(v, "position", None) or getattr(v, "pos", None)
+                    if pos is not None:
+                        loop_pts.append(Vec3(float(pos.x()), float(pos.y()), float(pos.z())))
+            except Exception:
+                pass
+            if loop_pts:
+                c = CurveData(points=loop_pts, closed=True)
+                return {"curve": c, "holes": [], "points": loop_pts, "count": len(loop_pts)}
+
+        if hasattr(face, "mesh"):
+            face = getattr(face, "mesh")
+
+        # Handle MeshData
+        if isinstance(face, MeshData):
+            verts = face.vertices
+            faces = face.faces
+            if not faces and verts:
+                pts = [Vec3(v[0], v[1], v[2]) for v in verts]
+                c = CurveData(points=pts, closed=True)
+                return {"curve": c, "holes": [], "points": pts, "count": len(pts)}
+            if len(faces) == 1:
+                pts = [Vec3(verts[i][0], verts[i][1], verts[i][2]) for i in faces[0]]
+                c = CurveData(points=pts, closed=True)
+                return {"curve": c, "holes": [], "points": pts, "count": len(pts)}
+
+            # Multi-face mesh: topological boundary half-edges
+            half_edges = set()
+            edge_counts = {}
+            for f in faces:
+                fn = len(f)
+                for i in range(fn):
+                    u, v = f[i], f[(i + 1) % fn]
+                    half_edges.add((u, v))
+                    undir = (min(u, v), max(u, v))
+                    edge_counts[undir] = edge_counts.get(undir, 0) + 1
+
+            boundary_next = {}
+            for (u, v) in half_edges:
+                if (v, u) not in half_edges or edge_counts.get((min(u, v), max(u, v)), 0) == 1:
+                    boundary_next[u] = v
+
+            loops = []
+            if boundary_next:
+                visited = set()
+                for start in list(boundary_next.keys()):
+                    if start in visited:
+                        continue
+                    curr = start
+                    loop = []
+                    while curr is not None and curr not in visited:
+                        visited.add(curr)
+                        loop.append(curr)
+                        curr = boundary_next.get(curr)
+                        if curr == start:
+                            break
+                    if len(loop) >= 3:
+                        loops.append(loop)
+
+            if not loops:
+                pts = [Vec3(v[0], v[1], v[2]) for v in verts]
+                c = CurveData(points=pts, closed=True)
+                return {"curve": c, "holes": [], "points": pts, "count": len(pts)}
+
+            def loop_perimeter(lp):
+                p = 0.0
+                for i in range(len(lp)):
+                    p0 = verts[lp[i]]
+                    p1 = verts[lp[(i + 1) % len(lp)]]
+                    p += ((p1[0] - p0[0]) ** 2 + (p1[1] - p0[1]) ** 2 + (p1[2] - p0[2]) ** 2) ** 0.5
+                return p
+
+            sorted_loops = sorted(loops, key=loop_perimeter, reverse=True)
+            outer_loop = sorted_loops[0]
+            hole_loops = sorted_loops[1:]
+
+            outer_pts = [Vec3(verts[i][0], verts[i][1], verts[i][2]) for i in outer_loop]
+            outer_curve = CurveData(points=outer_pts, closed=True)
+            hole_curves = [
+                CurveData(points=[Vec3(verts[i][0], verts[i][1], verts[i][2]) for i in hl], closed=True)
+                for hl in hole_loops
+            ]
+
+            return {
+                "curve": outer_curve,
+                "holes": hole_curves,
+                "points": outer_pts,
+                "count": len(outer_pts),
+            }
+
+        # Fallback if list of points
+        if isinstance(face, (list, tuple)) and face:
+            pts = [p if isinstance(p, Vec3) else Vec3(float(p[0]), float(p[1]), float(p[2])) for p in face]
+            c = CurveData(points=pts, closed=True)
+            return {"curve": c, "holes": [], "points": pts, "count": len(pts)}
+
+        # Default fallback
+        d_pts = [Vec3(0, 0, 0), Vec3(1, 0, 0), Vec3(1, 1, 0), Vec3(0, 1, 0)]
+        d_c = CurveData(points=d_pts, closed=True)
+        return {"curve": d_c, "holes": [], "points": d_pts, "count": 4}
+
 
 # ============================================================================
 # 11. Curve / Surface Points Extraction Node
@@ -644,7 +847,7 @@ class DivideCurveNode(BaseNode):
     outputs = [
         OutputSpec("points", "Points", SocketType.VEC3),
         OutputSpec("planes", "Planes", SocketType.ANY),
-        OutputSpec("tangents", "Tangents", SocketType.VEC3),
+        OutputSpec("tangents", "Tangents", SocketType.VEC3, hide_preview=True),
         OutputSpec("normals", "Normals", SocketType.VEC3),
         OutputSpec("segments", "Segments", SocketType.ANY),
         OutputSpec("params", "Parameters (0-1)", SocketType.FLOAT),
@@ -1394,3 +1597,816 @@ class MidpointNode(BaseNode):
         }
 
 NODE_REGISTRY["point.midpoint"] = MidpointNode
+
+
+# ============================================================================
+# Safe Imports for Interactive Viewport Tool & Handles
+# ============================================================================
+try:
+    from tools.base import Tool, ToolContext
+except ImportError:
+    class Tool:  # type: ignore
+        name = "Tool"
+        description = ""
+        uses_snap = True
+        vcb_label = None
+        def on_activate(self, viewport: Any) -> None: pass
+        def on_deactivate(self, viewport: Any) -> None: pass
+        def on_click(self, ctx: Any) -> None: pass
+        def on_hover(self, ctx: Any) -> None: pass
+        def on_cancel(self, viewport: Any) -> None: pass
+        def on_double_click(self, ctx: Any) -> None: pass
+        def on_undo(self, viewport: Any) -> bool: return False
+        def on_value(self, viewport: Any, value: Any) -> bool: return False
+        def rubber_band_lines(self) -> List[Any]: return []
+
+    class ToolContext:  # type: ignore
+        pass
+
+try:
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QMatrix4x4, QVector3D
+except ImportError:
+    Qt = None  # type: ignore
+    QMatrix4x4 = None  # type: ignore
+    QVector3D = None  # type: ignore
+
+
+# ============================================================================
+# Pure Mathematical Spline / NURBS Evaluators
+# ============================================================================
+def evaluate_nurbs_curve(
+    control_points: List[Vec3],
+    degree: int = 3,
+    closed: bool = False,
+    samples: int = 100,
+) -> Tuple[List[Vec3], float]:
+    """
+    Evaluates a smooth B-Spline / NURBS curve from control points using De Boor's algorithm.
+    Returns (evaluated_points, curve_length).
+    """
+    n = len(control_points)
+    if n == 0:
+        return [], 0.0
+    if n == 1:
+        return [control_points[0]], 0.0
+    if n == 2:
+        p0, p1 = control_points[0], control_points[1]
+        num_s = max(2, samples)
+        pts = [
+            Vec3(
+                p0.x + (p1.x - p0.x) * (i / float(num_s - 1)),
+                p0.y + (p1.y - p0.y) * (i / float(num_s - 1)),
+                p0.z + (p1.z - p0.z) * (i / float(num_s - 1)),
+            )
+            for i in range(num_s)
+        ]
+        return pts, p0.distance_to(p1)
+
+    p = max(1, min(degree, n - 1))
+    pts_in = list(control_points)
+
+    if closed:
+        pts_in = pts_in + pts_in[:p]
+        m = len(pts_in)
+        knots = [float(i) for i in range(m + p + 1)]
+        u_min = knots[p]
+        u_max = knots[m]
+    else:
+        m = n
+        num_middle = m - p
+        knots = [0.0] * (p + 1)
+        for i in range(1, num_middle):
+            knots.append(i / float(num_middle))
+        knots.extend([1.0] * (p + 1))
+        u_min = 0.0
+        u_max = 1.0
+
+    eval_pts: List[Vec3] = []
+    total_len = 0.0
+    prev_pt: Optional[Vec3] = None
+    num_eval = max(2, samples)
+
+    for s_idx in range(num_eval):
+        t = s_idx / float(num_eval - 1)
+        u = u_min + t * (u_max - u_min)
+        if s_idx == num_eval - 1:
+            u = u_max - 1e-9
+
+        k = p
+        for j in range(p, len(knots) - p - 1):
+            if knots[j] <= u < knots[j + 1]:
+                k = j
+                break
+        else:
+            k = len(knots) - p - 2
+
+        d = [Vec3(pts_in[j].x, pts_in[j].y, pts_in[j].z) for j in range(k - p, k + 1)]
+
+        for r in range(1, p + 1):
+            for j in range(p, r - 1, -1):
+                i_knot = j + k - p
+                denom = knots[i_knot + p + 1 - r] - knots[i_knot]
+                alpha = (u - knots[i_knot]) / denom if abs(denom) > 1e-12 else 0.0
+                d[j] = Vec3(
+                    (1.0 - alpha) * d[j - 1].x + alpha * d[j].x,
+                    (1.0 - alpha) * d[j - 1].y + alpha * d[j].y,
+                    (1.0 - alpha) * d[j - 1].z + alpha * d[j].z,
+                )
+
+        pt = d[p]
+        eval_pts.append(pt)
+        if prev_pt is not None:
+            total_len += prev_pt.distance_to(pt)
+        prev_pt = pt
+
+    if closed and eval_pts:
+        total_len += eval_pts[-1].distance_to(eval_pts[0])
+
+    return eval_pts, total_len
+
+
+def evaluate_interpolated_curve(
+    points: List[Vec3],
+    closed: bool = False,
+    samples: int = 100,
+    alpha: float = 0.5,
+) -> Tuple[List[Vec3], float, List[Vec3]]:
+    """
+    Evaluates a smooth spline passing directly through all given points.
+    alpha=0.5 -> Centripetal (avoids loops and cusps).
+    Returns (evaluated_points, total_length, tangent_vectors).
+    """
+    n = len(points)
+    if n == 0:
+        return [], 0.0, []
+    if n == 1:
+        return [points[0]], 0.0, [Vec3(0, 0, 1)]
+    if n == 2:
+        p0, p1 = points[0], points[1]
+        tangent = (p1 - p0).normalized() if p0.distance_to(p1) > 1e-9 else Vec3(0, 0, 1)
+        num_s = max(2, samples)
+        pts = [
+            Vec3(
+                p0.x + (p1.x - p0.x) * (i / float(num_s - 1)),
+                p0.y + (p1.y - p0.y) * (i / float(num_s - 1)),
+                p0.z + (p1.z - p0.z) * (i / float(num_s - 1)),
+            )
+            for i in range(num_s)
+        ]
+        return pts, p0.distance_to(p1), [tangent] * num_s
+
+    pts = list(points)
+    num_segments = n if closed else n - 1
+    eval_pts: List[Vec3] = []
+    tangents: List[Vec3] = []
+    total_len = 0.0
+    prev_pt: Optional[Vec3] = None
+    samples_per_seg = max(2, samples // num_segments)
+
+    for seg_idx in range(num_segments):
+        if closed:
+            p0 = pts[(seg_idx - 1) % n]
+            p1 = pts[seg_idx % n]
+            p2 = pts[(seg_idx + 1) % n]
+            p3 = pts[(seg_idx + 2) % n]
+        else:
+            p1 = pts[seg_idx]
+            p2 = pts[seg_idx + 1]
+            p0 = (p1 * 2.0 - p2) if seg_idx == 0 else pts[seg_idx - 1]
+            p3 = (p2 * 2.0 - p1) if seg_idx == num_segments - 1 else pts[seg_idx + 2]
+
+        def get_t(t_curr: float, pa: Vec3, pb: Vec3) -> float:
+            d = pa.distance_to(pb)
+            return t_curr + (d ** alpha if d > 1e-9 else 1e-4)
+
+        t0 = 0.0
+        t1 = get_t(t0, p0, p1)
+        t2 = get_t(t1, p1, p2)
+        t3 = get_t(t2, p2, p3)
+
+        seg_samples = samples_per_seg if seg_idx < num_segments - 1 else (samples - len(eval_pts))
+        seg_samples = max(2, seg_samples)
+        num_steps = seg_samples if (seg_idx == num_segments - 1 and not closed) else seg_samples - 1
+
+        for step in range(num_steps):
+            s = step / float(seg_samples - 1)
+            t = t1 + s * (t2 - t1)
+
+            a1 = p0 * ((t1 - t) / (t1 - t0)) + p1 * ((t - t0) / (t1 - t0))
+            a2 = p1 * ((t2 - t) / (t2 - t1)) + p2 * ((t - t1) / (t2 - t1))
+            a3 = p2 * ((t3 - t) / (t3 - t2)) + p3 * ((t - t2) / (t3 - t2))
+
+            b1 = a1 * ((t2 - t) / (t2 - t0)) + a2 * ((t - t0) / (t2 - t0))
+            b2 = a2 * ((t3 - t) / (t3 - t1)) + a3 * ((t - t1) / (t3 - t1))
+
+            c = b1 * ((t2 - t) / (t2 - t1)) + b2 * ((t - t1) / (t2 - t1))
+
+            eval_pts.append(c)
+            if prev_pt is not None:
+                d = prev_pt.distance_to(c)
+                total_len += d
+                tan = (c - prev_pt).normalized() if d > 1e-9 else Vec3(0, 0, 1)
+                tangents.append(tan)
+            prev_pt = c
+
+    if eval_pts and len(tangents) < len(eval_pts):
+        tangents.append(tangents[-1] if tangents else Vec3(0, 0, 1))
+
+    if closed and eval_pts:
+        total_len += eval_pts[-1].distance_to(eval_pts[0])
+
+    return eval_pts, total_len, tangents
+
+
+# ============================================================================
+# Interactive Viewport Point Insertion Tool
+# ============================================================================
+class PointInsertTool(Tool):
+    """Interactive 3D viewport tool for clicking and placing curve points with live snapping."""
+    name = "Insert Curve Points"
+    description = "Click in 3D viewport to insert curve control points (Enter/Esc/double-click when done, Backspace to undo)."
+    uses_snap = True
+    vcb_label = "Point (X;Y;Z)"
+
+    def __init__(self, node: Any, on_change: Optional[Callable[[], None]] = None) -> None:
+        super().__init__()
+        self.node = node
+        self.on_change = on_change
+        self.hover_point: Any = None
+        self.viewport: Any = None
+
+    def on_activate(self, viewport: Any) -> None:
+        self.viewport = viewport
+        if Qt is not None and hasattr(viewport, "setCursor"):
+            viewport.setCursor(Qt.CursorShape.CrossCursor)
+        flash = getattr(viewport, "flash_status", None)
+        if callable(flash):
+            pts = self.node.param_values.get("stored_points", [])
+            flash(f"📍 Point Insertion Active: {len(pts)} existing points. Click in viewport to add points. Press Enter/Esc when finished.")
+
+    def on_deactivate(self, viewport: Any) -> None:
+        if hasattr(viewport, "unsetCursor"):
+            viewport.unsetCursor()
+        self.hover_point = None
+
+    def on_click(self, ctx: Any) -> None:
+        world_pt = getattr(ctx, "world", None)
+        if world_pt is None:
+            return
+        px = float(world_pt.x() if callable(world_pt.x) else world_pt.x)
+        py = float(world_pt.y() if callable(world_pt.y) else world_pt.y)
+        pz = float(world_pt.z() if callable(world_pt.z) else world_pt.z)
+
+        pts = list(self.node.param_values.get("stored_points", []))
+        pts.append((round(px, 4), round(py, 4), round(pz, 4)))
+        self.node.param_values["stored_points"] = pts
+        self.node.is_dirty = True
+
+        app = getattr(self.node, "_app_ref", None) or getattr(getattr(ctx.viewport, "window", None), "_extension_app_handle", None)
+        if self.node.param_values.get("handles_active", False):
+            self.node.spawn_handles(app)
+
+        if callable(self.on_change):
+            self.on_change()
+
+        if hasattr(self.node, "_item_ref") and self.node._item_ref:
+            try:
+                self.node._item_ref._update_badge()
+                self.node._item_ref._update_action_buttons()
+                self.node._item_ref.update()
+            except Exception:
+                pass
+
+        flash = getattr(ctx.viewport, "flash_status", None)
+        if callable(flash):
+            flash(f"Point #{len(pts)} placed at ({px:.2f}, {py:.2f}, {pz:.2f}) — click more points, or Enter/Esc to finish")
+        ctx.viewport.update()
+
+    def on_hover(self, ctx: Any) -> None:
+        self.hover_point = getattr(ctx, "world", None)
+        if hasattr(ctx.viewport, "update"):
+            ctx.viewport.update()
+
+    def rubber_band_lines(self) -> List[Any]:
+        pts = self.node.param_values.get("stored_points", [])
+        if not pts or QVector3D is None:
+            return []
+        qvecs = [QVector3D(float(p[0]), float(p[1]), float(p[2])) for p in pts]
+        lines = []
+        for i in range(len(qvecs) - 1):
+            lines.append((qvecs[i], qvecs[i + 1]))
+        if qvecs and self.hover_point is not None:
+            lines.append((qvecs[-1], self.hover_point))
+            if self.node.param_values.get("closed"):
+                lines.append((self.hover_point, qvecs[0]))
+        return lines
+
+    def on_double_click(self, ctx: Any) -> None:
+        self.finish(ctx.viewport)
+
+    def on_cancel(self, viewport: Any) -> None:
+        self.finish(viewport)
+
+    def finish(self, viewport: Any) -> None:
+        win = getattr(viewport, "window", None)
+        if win and hasattr(win, "activate_select_tool"):
+            win.activate_select_tool()
+        elif hasattr(viewport, "set_active_tool"):
+            viewport.set_active_tool(None)
+        if hasattr(viewport, "unsetCursor"):
+            viewport.unsetCursor()
+        if callable(self.on_change):
+            self.on_change()
+        flash = getattr(viewport, "flash_status", None)
+        if callable(flash):
+            n = len(self.node.param_values.get("stored_points", []))
+            flash(f"Finished inserting points: {n} points committed.")
+
+    def on_undo(self, viewport: Any) -> bool:
+        pts = list(self.node.param_values.get("stored_points", []))
+        if pts:
+            popped = pts.pop()
+            self.node.param_values["stored_points"] = pts
+            self.node.is_dirty = True
+            app = getattr(self.node, "_app_ref", None) or getattr(getattr(viewport, "window", None), "_extension_app_handle", None)
+            if self.node.param_values.get("handles_active", False):
+                self.node.spawn_handles(app)
+            if callable(self.on_change):
+                self.on_change()
+            if hasattr(self.node, "_item_ref") and self.node._item_ref:
+                try:
+                    self.node._item_ref._update_badge()
+                    self.node._item_ref._update_action_buttons()
+                    self.node._item_ref.update()
+                except Exception:
+                    pass
+            viewport.update()
+            flash = getattr(viewport, "flash_status", None)
+            if callable(flash):
+                flash(f"Removed last point ({popped[0]:.2f}, {popped[1]:.2f}, {popped[2]:.2f}). Remaining: {len(pts)}")
+            return True
+        return False
+
+    def on_value(self, viewport: Any, value: Any) -> bool:
+        if isinstance(value, (list, tuple)) and len(value) >= 3:
+            pts = list(self.node.param_values.get("stored_points", []))
+            pts.append((round(float(value[0]), 4), round(float(value[1]), 4), round(float(value[2]), 4)))
+            self.node.param_values["stored_points"] = pts
+            self.node.is_dirty = True
+            if callable(self.on_change):
+                self.on_change()
+            viewport.update()
+            return True
+        return False
+
+
+# ============================================================================
+# Viewport Curve Base Class
+# ============================================================================
+class ViewportCurveNodeBase(BaseNode):
+    """Shared base class for curves supporting interactive viewport point insertion and draggable handles."""
+
+    DEFAULT_POINTS = [
+        (0.0, 0.0, 0.0),
+        (2.0, 3.0, 0.0),
+        (5.0, 3.0, 0.0),
+        (7.0, 0.0, 0.0),
+    ]
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.param_values.setdefault("stored_points", [list(p) for p in self.DEFAULT_POINTS])
+        self.param_values.setdefault("handles_active", False)
+        self._app_ref: Any = None
+        self._item_ref: Any = None
+        self._last_evaluated_points: List[Vec3] = []
+
+    def get_action_buttons(self) -> List[Dict[str, Any]]:
+        is_handles = self.param_values.get("handles_active", False)
+        btn_handles_label = "🎯 Hide Handles" if is_handles else "🎯 Viewport Handles"
+        btn_handles_color = "#3b6e50" if is_handles else "#434c5e"
+        return [
+            {
+                "id": "btn_insert_points",
+                "label": "📍 Click in Viewport",
+                "tooltip": "Click anywhere in the 3D viewport to insert curve control points (Enter/Esc to finish)",
+                "color": "#2b5278",
+                "action": "insert_points",
+            },
+            {
+                "id": "btn_toggle_handles",
+                "label": btn_handles_label,
+                "tooltip": "Spawn draggable 3D handle markers in the scene so you can drag points anytime with the Move tool (M)",
+                "color": btn_handles_color,
+                "action": "toggle_handles",
+            },
+            {
+                "id": "btn_clear_points",
+                "label": "❌ Clear Points",
+                "tooltip": "Clear all stored/clicked points back to empty",
+                "color": "#4c566a",
+                "action": "clear_points",
+            },
+        ]
+
+    def get_card_badge_text(self) -> Optional[str]:
+        pts = self.get_active_points()
+        n = len(pts)
+        is_handles = self.param_values.get("handles_active", False)
+        handle_str = " (Handles 🟢)" if is_handles else ""
+        if n == 0:
+            return "⚪ No points (click button to add)"
+        return f"📍 {n} pts{handle_str}"
+
+    def get_active_points(self, inputs_points: Any = None) -> List[Vec3]:
+        """
+        Returns active control points.
+        When handles are active, user is interactively manipulating stored points in viewport.
+        When handles are inactive and a wire is connected, wire takes precedence.
+        """
+        is_handles = self.param_values.get("handles_active", False)
+        if inputs_points is not None and not is_handles:
+            if isinstance(inputs_points, (list, tuple)):
+                res = []
+                for p in inputs_points:
+                    if isinstance(p, Vec3):
+                        res.append(p)
+                    elif hasattr(p, "x") and hasattr(p, "y") and hasattr(p, "z"):
+                        res.append(Vec3(float(p.x), float(p.y), float(p.z)))
+                    elif isinstance(p, (list, tuple)) and len(p) >= 3:
+                        res.append(Vec3(float(p[0]), float(p[1]), float(p[2])))
+                if res:
+                    return res
+            elif isinstance(inputs_points, Vec3):
+                return [inputs_points]
+
+        stored = self.param_values.get("stored_points", [])
+        res = []
+        for p in stored:
+            if isinstance(p, Vec3):
+                res.append(p)
+            elif isinstance(p, (list, tuple)) and len(p) >= 3:
+                res.append(Vec3(float(p[0]), float(p[1]), float(p[2])))
+            elif isinstance(p, dict) and "x" in p:
+                res.append(Vec3(float(p["x"]), float(p["y"]), float(p.get("z", 0.0))))
+        if not res and inputs_points is None and not self.param_values.get("cleared_explicitly", False):
+            # Fall back to default control points
+            return [Vec3(float(p[0]), float(p[1]), float(p[2])) for p in self.DEFAULT_POINTS]
+        return res
+
+    def _resolve_app(self, app: Any = None) -> Any:
+        app = app or getattr(self, "_app_ref", None)
+        if app is None:
+            try:
+                from PySide6.QtWidgets import QApplication
+                qapp = QApplication.instance()
+                app = getattr(qapp, "_extension_app_handle", None)
+                if not app and qapp is not None:
+                    for w in qapp.topLevelWidgets():
+                        if hasattr(w, "viewport") or hasattr(w, "scene"):
+                            return w
+                        if hasattr(w, "_extension_app_handle"):
+                            return getattr(w, "_extension_app_handle")
+            except Exception:
+                pass
+        return app
+
+    def _resolve_context(self, app: Any = None) -> Tuple[Optional[Any], Optional[Any], Optional[Any]]:
+        app = self._resolve_app(app)
+        if app is None:
+            return (None, None, None)
+        win = getattr(app, "_window", None) or getattr(app, "window", None) or app
+        vp = getattr(app, "viewport", None) or getattr(win, "viewport", None)
+        sc = getattr(app, "scene", None) or getattr(win, "scene", None) or (getattr(vp, "scene", None) if vp else None)
+        return (app, sc, vp)
+
+    def insert_points(self, app: Any = None) -> Tuple[str, bool]:
+        app, sc, vp = self._resolve_context(app)
+        self._app_ref = app
+        if not vp or not hasattr(vp, "set_active_tool"):
+            return ("No IngeTrazo viewport available", False)
+
+        def _on_points_changed() -> None:
+            self.is_dirty = True
+            win = getattr(app, "_window", None) or getattr(app, "window", None) or app
+            editor = getattr(win, "_node_editor_widget", None)
+            if editor and hasattr(editor, "schedule_eval"):
+                editor.schedule_eval()
+
+        tool = PointInsertTool(self, on_change=_on_points_changed)
+        vp.set_active_tool(tool)
+        return ("Point insertion active in viewport", True)
+
+    def toggle_handles(self, app: Any = None) -> Tuple[str, bool]:
+        is_active = self.param_values.get("handles_active", False)
+        new_state = not is_active
+        self.param_values["handles_active"] = new_state
+        if new_state:
+            msg = self.spawn_handles(app)
+            return (msg, True)
+        else:
+            msg = self.clear_handles(app)
+            return (msg, True)
+
+    def spawn_handles(self, app: Any = None) -> str:
+        app, scene, vp = self._resolve_context(app)
+        if scene is None or not hasattr(scene, "groups"):
+            return "No scene available"
+
+        self.clear_handles(app)
+
+        # If stored_points is empty but we had wired points, initialize stored_points from them!
+        if not self.param_values.get("stored_points") and self._last_evaluated_points:
+            self.param_values["stored_points"] = [
+                (round(float(p.x), 4), round(float(p.y), 4), round(float(p.z), 4))
+                for p in self._last_evaluated_points
+            ]
+
+        pts = self.get_active_points()
+        if not pts:
+            self.param_values["stored_points"] = [list(p) for p in self.DEFAULT_POINTS]
+            pts = self.get_active_points()
+
+        try:
+            from core.mesh import Mesh
+        except ImportError:
+            return "core.mesh not available"
+
+        try:
+            from core.group import Group
+        except ImportError:
+            try:
+                from core.scene import Group
+            except ImportError:
+                return "Group not available"
+
+        try:
+            from PySide6.QtGui import QMatrix4x4, QVector3D
+        except ImportError:
+            return "PySide6.QtGui not available"
+
+        for i, p in enumerate(pts):
+            m = Mesh()
+            # No 3D polyhedron facets: points are rendered as smooth 2D circles in the conduit overlay (Rhino style)
+            m._chunk_dirty = False
+            m._attrs_dirty = False
+
+            handle_name = f"CP {i + 1} ({self.title})"
+            try:
+                grp = Group(m, handle_name)
+            except TypeError:
+                try:
+                    grp = Group(name=handle_name, mesh=m)
+                except TypeError:
+                    grp = Group()
+                    grp.name = handle_name
+                    grp.mesh = m
+
+            grp.xform = QMatrix4x4()
+            grp.xform.translate(QVector3D(float(p.x), float(p.y), float(p.z)))
+            grp.material = {"color": [0.95, 0.6, 0.1, 1.0]}
+            grp.ext = {
+                "_is_curve_handle": True,
+                "node_id": self.id,
+                "point_index": i,
+            }
+            scene.groups.append(grp)
+
+        try:
+            from core.history import _dirty_group_chunks
+            _dirty_group_chunks(scene)
+        except Exception:
+            pass
+
+        if hasattr(scene, "version"):
+            scene.version += 1
+
+        if vp is not None:
+            flash = getattr(vp, "flash_status", None)
+            if callable(flash):
+                flash(f"🎯 Viewport handles active: {len(pts)} points. Drag with Move tool (M).")
+            if hasattr(vp, "update"):
+                vp.update()
+
+        return f"Spawned {len(pts)} handles in viewport"
+
+    def clear_handles(self, app: Any = None) -> str:
+        app, scene, vp = self._resolve_context(app)
+        if scene is None or not hasattr(scene, "groups"):
+            return "No scene available"
+
+        before = len(scene.groups)
+        scene.groups[:] = [
+            g for g in scene.groups
+            if not (hasattr(g, "ext") and isinstance(g.ext, dict)
+                    and g.ext.get("_is_curve_handle") and g.ext.get("node_id") == self.id)
+        ]
+        if len(scene.groups) != before:
+            try:
+                from core.history import _dirty_group_chunks
+                _dirty_group_chunks(scene)
+            except Exception:
+                pass
+            if hasattr(scene, "version"):
+                scene.version += 1
+            if vp is not None and hasattr(vp, "update"):
+                vp.update()
+        return "Cleared handles"
+
+    def clear_points(self, app: Any = None) -> Tuple[str, bool]:
+        self.clear_handles(app)
+        self.param_values["stored_points"] = []
+        self.param_values["handles_active"] = False
+        self.param_values["cleared_explicitly"] = True
+        self.is_dirty = True
+        app, scene, vp = self._resolve_context(app)
+        if vp is not None:
+            flash = getattr(vp, "flash_status", None)
+            if callable(flash):
+                flash("❌ Points cleared")
+        return ("Points cleared", True)
+
+    def sync_from_scene(self, app: Any = None) -> bool:
+        if not self.param_values.get("handles_active", False):
+            return False
+        app, scene, vp = self._resolve_context(app)
+        if scene is None or not hasattr(scene, "groups"):
+            return False
+
+        stored = list(self.param_values.get("stored_points", []))
+        if not stored:
+            return False
+
+        try:
+            from PySide6.QtGui import QVector3D
+        except ImportError:
+            return False
+
+        changed = False
+        for grp in scene.groups:
+            ext = getattr(grp, "ext", None)
+            if isinstance(ext, dict) and ext.get("_is_curve_handle") and ext.get("node_id") == self.id:
+                idx = ext.get("point_index")
+                if idx is not None and 0 <= idx < len(stored):
+                    pos = None
+                    if getattr(grp, "xform", None) is not None:
+                        pos = grp.xform.map(QVector3D(0.0, 0.0, 0.0))
+                    elif hasattr(grp, "mesh") and grp.mesh and hasattr(grp.mesh, "vertices") and grp.mesh.vertices:
+                        vs = list(grp.mesh.vertices)
+                        pos = QVector3D(
+                            sum(v.position.x() for v in vs) / len(vs),
+                            sum(v.position.y() for v in vs) / len(vs),
+                            sum(v.position.z() for v in vs) / len(vs),
+                        )
+
+                    if pos is not None:
+                        nx, ny, nz = round(float(pos.x()), 4), round(float(pos.y()), 4), round(float(pos.z()), 4)
+                        ox, oy, oz = round(float(stored[idx][0]), 4), round(float(stored[idx][1]), 4), round(float(stored[idx][2]), 4)
+                        if (nx, ny, nz) != (ox, oy, oz):
+                            stored[idx] = (nx, ny, nz)
+                            changed = True
+
+        if changed:
+            self.param_values["stored_points"] = stored
+            self.is_dirty = True
+        return changed
+
+    def on_destroy(self) -> None:
+        self.clear_handles()
+
+
+# ============================================================================
+# NURBS Curve Node
+# ============================================================================
+@register_node
+class NurbsCurveNode(ViewportCurveNodeBase):
+    type_id = "curve.nurbs"
+    title = "NURBS Curve"
+    category = "Curves"
+    description = (
+        "Generates a smooth Non-Uniform Rational B-Spline (NURBS) curve from control points using De Boor's algorithm.\n"
+        "Click '📍 Click in Viewport' to place points directly in the 3D scene, or connect points to the input.\n"
+        "Click '🎯 Viewport Handles' to drag points anytime with the Move tool (M).\n"
+        "Outputs smooth curve, dense points, curve length, and control points."
+    )
+    header_color = (68, 108, 179)
+
+    inputs = [
+        InputSpec("points", "Points", SocketType.ANY, default=None, hide_widget=True),
+        InputSpec("degree", "Degree", SocketType.INT, default=3, min_val=1, max_val=5, step=1),
+        InputSpec("closed", "Closed", SocketType.BOOL, default=False),
+        InputSpec("samples", "Samples", SocketType.INT, default=100, min_val=10, max_val=1000, step=10),
+    ]
+    outputs = [
+        OutputSpec("curve", "Curve", SocketType.CURVE),
+        OutputSpec("points", "Points", SocketType.VEC3, hide_preview=True),
+        OutputSpec("length", "Length (m)", SocketType.FLOAT),
+        OutputSpec("control_points", "Control Points", SocketType.VEC3, hide_preview=True),
+    ]
+
+    def compute(
+        self,
+        points: Any = None,
+        degree: int = 3,
+        closed: bool = False,
+        samples: int = 100,
+    ) -> Dict[str, Any]:
+        active_pts = self.get_active_points(points)
+        self._last_evaluated_points = active_pts
+        if not active_pts:
+            return {
+                "curve": CurveData(points=[], closed=bool(closed)),
+                "points": [],
+                "length": 0.0,
+                "control_points": [],
+            }
+
+        degree_val = max(1, min(5, int(degree)))
+        samples_val = max(10, min(1000, int(samples)))
+        closed_val = bool(closed)
+
+        eval_pts, total_len = evaluate_nurbs_curve(
+            active_pts,
+            degree=degree_val,
+            closed=closed_val,
+            samples=samples_val,
+        )
+
+        cdata = CurveData(points=eval_pts, closed=closed_val)
+        return {
+            "curve": cdata,
+            "points": eval_pts,
+            "length": round(total_len, 4),
+            "control_points": active_pts,
+        }
+
+
+# ============================================================================
+# Interpolate Curve Node
+# ============================================================================
+@register_node
+class InterpolateCurveNode(ViewportCurveNodeBase):
+    type_id = "curve.interpolate"
+    title = "Interpolate Curve"
+    category = "Curves"
+    description = (
+        "Creates a smooth interpolated spline curve passing directly through every input point using Centripetal Catmull-Rom interpolation.\n"
+        "Click '📍 Click in Viewport' to insert points directly in the 3D scene, or connect points to the input.\n"
+        "Click '🎯 Viewport Handles' to drag points anytime in the viewport with the Move tool (M).\n"
+        "Outputs smooth curve, dense points, curve length, and tangent vectors."
+    )
+    header_color = (68, 108, 179)
+
+    inputs = [
+        InputSpec("points", "Points", SocketType.ANY, default=None, hide_widget=True),
+        InputSpec("closed", "Closed", SocketType.BOOL, default=False),
+        InputSpec("samples", "Samples", SocketType.INT, default=100, min_val=10, max_val=1000, step=10),
+        InputSpec("alpha", "Tension", SocketType.FLOAT, default=0.5, min_val=0.0, max_val=1.0, step=0.05),
+    ]
+    outputs = [
+        OutputSpec("curve", "Curve", SocketType.CURVE),
+        OutputSpec("points", "Points", SocketType.VEC3, hide_preview=True),
+        OutputSpec("length", "Length (m)", SocketType.FLOAT),
+        OutputSpec("tangents", "Tangents", SocketType.VEC3, hide_preview=True),
+    ]
+
+    def compute(
+        self,
+        points: Any = None,
+        closed: bool = False,
+        samples: int = 100,
+        alpha: float = 0.5,
+    ) -> Dict[str, Any]:
+        active_pts = self.get_active_points(points)
+        self._last_evaluated_points = active_pts
+        if not active_pts:
+            return {
+                "curve": CurveData(points=[], closed=bool(closed)),
+                "points": [],
+                "length": 0.0,
+                "tangents": [],
+            }
+
+        samples_val = max(10, min(1000, int(samples)))
+        closed_val = bool(closed)
+        alpha_val = max(0.0, min(1.0, float(alpha)))
+
+        eval_pts, total_len, tangents = evaluate_interpolated_curve(
+            active_pts,
+            closed=closed_val,
+            samples=samples_val,
+            alpha=alpha_val,
+        )
+
+        cdata = CurveData(points=eval_pts, closed=closed_val)
+        return {
+            "curve": cdata,
+            "points": eval_pts,
+            "length": round(total_len, 4),
+            "tangents": tangents,
+        }
+
+
+NODE_REGISTRY["curve.nurbs_curve"] = NurbsCurveNode
+NODE_REGISTRY["curve.spline"] = InterpolateCurveNode

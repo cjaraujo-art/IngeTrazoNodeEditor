@@ -37,6 +37,7 @@ class OutputSpec:
     id: str
     label: str
     type: SocketType = SocketType.FLOAT
+    hide_preview: bool = False
 
 
 # Global Registry mapping type_id -> BaseNode subclass (shared singleton across package/standalone imports)

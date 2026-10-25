@@ -71,7 +71,7 @@ except Exception:
 
 PLUGIN = {
     "name": "IngeTrazo Parametric Node Editor",
-    "version": "1.7.0",
+    "version": "1.7.1",
     "author": "seghier",
     "description": "Visual parametric node editor with Blender-style sliders, live viewport sync, and BIM tagging.",
 }
@@ -405,7 +405,77 @@ class IngeTrazoSceneBridge:
         self.engine = engine
         self.live_sync: bool = True
         self.last_error: Optional[str] = None
+        self._is_internal_scene_bump: bool = False
+        self._last_handled_version: Optional[int] = None
+        self.on_scene_nodes_updated: Optional[Callable[[], None]] = None
         self.engine.on_evaluated = self._on_graph_evaluated
+        self._setup_scene_listener()
+
+    def _setup_scene_listener(self) -> None:
+        """Connects viewport sceneVersionChanged signal and a fallback QTimer to detect external geometry moves."""
+        vp = self.viewport
+        if vp is not None and hasattr(vp, "sceneVersionChanged"):
+            try:
+                vp.sceneVersionChanged.connect(self._on_viewport_scene_changed)
+            except Exception:
+                pass
+
+        try:
+            from PySide6.QtCore import QTimer
+            self._scene_poll_timer = QTimer()
+            self._scene_poll_timer.setInterval(100)
+            self._scene_poll_timer.timeout.connect(self._poll_scene_version)
+            self._scene_poll_timer.start()
+        except Exception:
+            self._scene_poll_timer = None
+
+    def _on_viewport_scene_changed(self, version: int = 0) -> None:
+        if self._is_internal_scene_bump:
+            return
+        self._handle_external_scene_change()
+
+    def _poll_scene_version(self) -> None:
+        if self._is_internal_scene_bump:
+            return
+        sc = self.scene
+        if sc is not None and hasattr(sc, "version"):
+            curr_ver = sc.version
+            if self._last_handled_version is None:
+                self._last_handled_version = curr_ver
+                return
+            if curr_ver != self._last_handled_version:
+                self._last_handled_version = curr_ver
+                self._handle_external_scene_change()
+
+    def _handle_external_scene_change(self) -> None:
+        """When user moves/edits scene geometry, find any SelectCurveNode / ReferenceFaceNode and sync!"""
+        if self._is_internal_scene_bump:
+            return
+        changed_any = False
+        for node in list(self.engine.nodes.values()):
+            if hasattr(node, "sync_from_scene"):
+                try:
+                    changed = node.sync_from_scene(self.app)
+                    if changed:
+                        self.engine.mark_dirty(node.id)
+                        changed_any = True
+                except Exception:
+                    pass
+
+        if changed_any:
+            if callable(self.on_scene_nodes_updated):
+                try:
+                    self.on_scene_nodes_updated()
+                except Exception:
+                    pass
+            self.engine.evaluate()
+
+    def stop(self) -> None:
+        if hasattr(self, "_scene_poll_timer") and self._scene_poll_timer is not None:
+            try:
+                self._scene_poll_timer.stop()
+            except Exception:
+                pass
 
     @property
     def scene(self) -> Any:
@@ -423,33 +493,38 @@ class IngeTrazoSceneBridge:
 
     def _bump_viewport(self) -> None:
         """Notifies IngeTrazo's OpenGL renderer that scene geometry changed."""
-        sc = self.scene
-        if sc is not None:
-            if hasattr(sc, "version"):
-                sc.version += 1
-            for fn_name in ("invalidate", "mark_dirty"):
-                fn = getattr(sc, fn_name, None)
-                if callable(fn):
-                    try:
-                        fn()
-                    except Exception:
-                        pass
+        self._is_internal_scene_bump = True
+        try:
+            sc = self.scene
+            if sc is not None:
+                if hasattr(sc, "version"):
+                    sc.version += 1
+                    self._last_handled_version = sc.version
+                for fn_name in ("invalidate", "mark_dirty"):
+                    fn = getattr(sc, fn_name, None)
+                    if callable(fn):
+                        try:
+                            fn()
+                        except Exception:
+                            pass
 
-        if hasattr(self.app, "notify_scene_changed"):
-            try:
-                self.app.notify_scene_changed()
-            except Exception:
-                pass
+            if hasattr(self.app, "notify_scene_changed"):
+                try:
+                    self.app.notify_scene_changed()
+                except Exception:
+                    pass
 
-        vp = self.viewport
-        if vp is not None:
-            for fn_name in ("invalidate_buffers", "mark_dirty", "update"):
-                fn = getattr(vp, fn_name, None)
-                if callable(fn):
-                    try:
-                        fn()
-                    except Exception:
-                        pass
+            vp = self.viewport
+            if vp is not None:
+                for fn_name in ("invalidate_buffers", "mark_dirty", "update"):
+                    fn = getattr(vp, fn_name, None)
+                    if callable(fn):
+                        try:
+                            fn()
+                        except Exception:
+                            pass
+        finally:
+            self._is_internal_scene_bump = False
 
     def on_nodes_selected(self, selected_node_ids: List[str]) -> None:
         """Highlights the geometry of currently selected canvas node(s) in the 3D viewport."""
@@ -699,6 +774,7 @@ class NodeEditorDialog(QDialog):
             on_node_selection_changed=self.bridge.on_nodes_selected,
             parent=self,
         )
+        self.bridge.on_scene_nodes_updated = self.editor_widget.scene.update_all_badges
 
         footer = QWidget()
         footer.setStyleSheet("background: #181a1f; color: #abb2bf; border-top: 1px solid #2c313a;")
@@ -736,6 +812,7 @@ class NodeEditorDialog(QDialog):
             )
 
     def closeEvent(self, event) -> None:
+        self.bridge.stop()
         self.bridge.clear_preview(refresh=True)
         super().closeEvent(event)
 
@@ -746,6 +823,12 @@ _ACTIVE_DIALOG: Optional[NodeEditorDialog] = None
 def open_node_editor(app: Any) -> None:
     """Opens or brings to front the Parametric Node Editor (tab or window)."""
     win = getattr(app, "_window", None) or getattr(app, "window", None)
+    editor = getattr(win, "_node_editor_widget", None)
+    if editor is not None and hasattr(editor, "is_floating") and editor.is_floating():
+        editor.bring_to_front()
+        editor.schedule_eval()
+        return
+
     dock = getattr(win, "_node_editor_dock", None)
     if dock is not None:
         if hasattr(win, "set_tray_shown"):
@@ -756,7 +839,6 @@ def open_node_editor(app: Any) -> None:
         dock.show()
         dock.raise_()
         dock.activateWindow()
-        editor = getattr(win, "_node_editor_widget", None)
         if editor:
             editor.schedule_eval()
         return
@@ -782,7 +864,7 @@ except ImportError:
 
 class NodeEditorTool(Tool):
     """Extensions menu entry to bring the Node Editor tab to the front."""
-    name = "Parametric Node Editor"
+    name = "Node Editor"
     shortcut = "Ctrl+Shift+N"
     description = "Open the visual parametric node editor tab."
     uses_snap = False
@@ -791,6 +873,12 @@ class NodeEditorTool(Tool):
         window = getattr(viewport, "window", None)
         if callable(window):
             window = window()
+        editor = getattr(window, "_node_editor_widget", None)
+        if editor is not None and hasattr(editor, "is_floating") and editor.is_floating():
+            editor.bring_to_front()
+            editor.schedule_eval()
+            return
+
         dock = getattr(window, "_node_editor_dock", None)
         if dock is not None:
             if hasattr(window, "set_tray_shown"):
@@ -801,7 +889,6 @@ class NodeEditorTool(Tool):
             dock.show()
             dock.raise_()
             dock.activateWindow()
-            editor = getattr(window, "_node_editor_widget", None)
             if editor:
                 editor.schedule_eval()
         else:
@@ -856,6 +943,7 @@ def setup(app: Any) -> None:
             get_app=lambda: app,
             on_node_selection_changed=bridge.on_nodes_selected,
         )
+        bridge.on_scene_nodes_updated = editor_widget.scene.update_all_badges
 
         # Register as a dock tab in the side tray (beside Properties, BIM, Solid Inspector)
         dock = None
@@ -869,6 +957,11 @@ def setup(app: Any) -> None:
             win._node_editor_widget = editor_widget
             win._node_editor_dock = dock
             win._node_editor_bridge = bridge
+            if hasattr(win, "setDockNestingEnabled"):
+                try:
+                    win.setDockNestingEnabled(True)
+                except Exception:
+                    pass
 
             # Ensure the tab is tabified with the side tray
             if dock is not None:
@@ -881,20 +974,6 @@ def setup(app: Any) -> None:
                         win.tabifyDockWidget(tray, dock)
                 QTimer.singleShot(0, _join_tray)
 
-        def show_editor():
-            open_node_editor(app)
-
-        if hasattr(app, "add_action"):
-            app.add_action(
-                "Parametric Node Editor...",
-                show_editor,
-                shortcut="Ctrl+Shift+N",
-            )
-        elif hasattr(app, "add_menu"):
-            sub = app.add_menu("Node Editor")
-            if sub is not None:
-                sub.addAction("Open Node Editor… (Ctrl+Shift+N)", show_editor)
-
     except Exception as ex:
         import logging
         logging.getLogger("ingetrazo.plugins").error(f"Error during Node Editor setup: {ex}", exc_info=True)
@@ -906,12 +985,21 @@ def register(app: Any) -> None:
 
 
 def unregister(app: Any) -> None:
-    """IngeTrazo Extension cleanup hook called when the plugin is disabled."""
+    """IngeTrazo Extension cleanup hook called when the plugin is disabled or IngeTrazo exits."""
     global _ACTIVE_DIALOG
     if _ACTIVE_DIALOG is not None:
         _ACTIVE_DIALOG.bridge.clear_preview(refresh=True)
         _ACTIVE_DIALOG.close()
         _ACTIVE_DIALOG = None
+    win = getattr(app, "_window", None) or getattr(app, "window", None)
+    if win:
+        editor = getattr(win, "_node_editor_widget", None)
+        if editor and hasattr(editor, "_floating_window") and editor._floating_window:
+            try:
+                editor._floating_window._is_host_closing = True
+                editor._floating_window.close()
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":
