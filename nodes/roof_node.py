@@ -428,7 +428,7 @@ class ParametricRoofNode(BaseNode):
             t1 = eave_top_indices[nxt]
             b0 = t0 + num_top_verts
             b1 = t1 + num_top_verts
-            mesh_faces.append([t0, t1, b1, b0])
+            mesh_faces.append([t0, b0, b1, t1])  # outward normal (boundary is counter-clockwise)
             mesh_edges.append((t0, t1))
             mesh_edges.append((b0, b1))
             mesh_edges.append((t0, b0))
