@@ -8492,7 +8492,7 @@ class NodeEditorWidget(QWidget):
 
         if hasattr(self, "btn_popout"):
 
-            self.btn_popout.setText(tr("⇲ Dock Tab") if is_floating else tr("⧉ Pop out"))
+            self.btn_popout.setText("⇲" if is_floating else "⧉")
 
             self.btn_popout.setToolTip(
 
@@ -9164,7 +9164,7 @@ class NodeEditorWidget(QWidget):
                 background: #1e2227;
                 border-right: 1px solid #333842;
             }
-            QPushButton {
+            #canvasSideToolbar QPushButton {
                 background: #282c34;
                 color: #abb2bf;
                 border: 1px solid #3e4451;
@@ -9173,25 +9173,33 @@ class NodeEditorWidget(QWidget):
                 max-width: 32px;
                 min-height: 32px;
                 max-height: 32px;
-                font-size: 16px;
+                font-size: 15px;
                 padding: 0px;
             }
-            QPushButton:hover {
+            #canvasSideToolbar QPushButton:hover {
                 background: #3e4451;
                 color: #ffffff;
                 border-color: #61afef;
             }
-            QPushButton:pressed {
+            #canvasSideToolbar QPushButton:pressed {
                 background: #21252b;
             }
-            QPushButton:checked {
+            #canvasSideToolbar QPushButton:checked {
                 background: #233b2c;
                 color: #a8e6b5;
                 border: 1px solid #48b870;
             }
-            QPushButton:checked:hover {
+            #canvasSideToolbar QPushButton:checked:hover {
                 background: #294734;
                 border: 1px solid #58cf84;
+            }
+            QToolTip {
+                font-size: 11px;
+                font-weight: normal;
+                color: #abb2bf;
+                background: #21252b;
+                border: 1px solid #3e4451;
+                padding: 3px 6px;
             }
         """)
 
@@ -9225,13 +9233,11 @@ class NodeEditorWidget(QWidget):
         # History: Undo, Redo
         self.btn_undo = QPushButton("↺")
         self.btn_undo.setToolTip(tr("Undo (Ctrl+Z)"))
-        self.btn_undo.setStyleSheet("font-size: 18px; font-weight: bold;")
 
         self.btn_redo = QPushButton("↻")
         self.btn_redo.setToolTip(tr("Redo (Ctrl+Y)"))
-        self.btn_redo.setStyleSheet("font-size: 18px; font-weight: bold;")
 
-        # Canvas tools: Fit, Minimap, Reload
+        # Canvas tools: Fit, Minimap, Pop out, Gumball, Reload
         self.btn_fit = QPushButton("🔎")
         self.btn_fit.setToolTip(tr("Fit all nodes in view (F)"))
 
@@ -9239,6 +9245,30 @@ class NodeEditorWidget(QWidget):
         self.btn_minimap.setToolTip(tr("Toggle Overview Minimap"))
         self.btn_minimap.setCheckable(True)
         self.btn_minimap.setChecked(False)
+
+        self.btn_popout = QPushButton("⧉")
+        self.btn_popout.setToolTip(tr("Pop out into movable floating window (multi-monitor support)"))
+        self.btn_popout.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.btn_popout.customContextMenuRequested.connect(self._show_popout_menu)
+
+        self.btn_gumball = QPushButton()
+        gumball_icon_path = os.path.join(os.path.dirname(__file__), "icons", "dark" if is_dark else "light", "gumball.png")
+        if not os.path.exists(gumball_icon_path):
+            gumball_icon_path = os.path.join(os.path.dirname(__file__), "icons", "dark", "gumball.png")
+        if not os.path.exists(gumball_icon_path):
+            gumball_icon_path = os.path.expandvars(r"%APPDATA%\IngeTrazo\plugins\gumball\gumball.png")
+        if os.path.exists(gumball_icon_path):
+            self.btn_gumball.setIcon(QIcon(gumball_icon_path))
+            self.btn_gumball.setIconSize(QSize(20, 20))
+        else:
+            self.btn_gumball.setText("🎯")
+
+        self.btn_gumball.setToolTip(tr("Toggle 3D Viewport Gumball Manipulator (Alt+G)"))
+        self.btn_gumball.setCheckable(True)
+
+        ctrl = self._find_gumball_controller()
+        initial_gumball = getattr(ctrl, "enabled", True) if ctrl is not None else True
+        self.btn_gumball.setChecked(initial_gumball)
 
         self.btn_reload = QPushButton("🔄")
         self.btn_reload.setToolTip(tr("Reload Nodes catalog"))
@@ -9252,6 +9282,8 @@ class NodeEditorWidget(QWidget):
         side_layout.addWidget(_make_v_sep())
         side_layout.addWidget(self.btn_fit)
         side_layout.addWidget(self.btn_minimap)
+        side_layout.addWidget(self.btn_popout)
+        side_layout.addWidget(self.btn_gumball)
         side_layout.addWidget(self.btn_reload)
         side_layout.addStretch(1)
 
@@ -9273,57 +9305,6 @@ class NodeEditorWidget(QWidget):
 
         self.btn_load_group = QPushButton(tr("📥 From Group"))
         self.btn_load_group.setToolTip(tr("Load embedded graph from selected IngeTrazo Group"))
-
-        self.btn_popout = QPushButton(tr("⧉ Pop out"))
-        self.btn_popout.setToolTip(tr("Pop out into movable floating window (multi-monitor support)"))
-        self.btn_popout.setStyleSheet("background: #3b4252; color: #61afef; border-radius: 4px; padding: 3px 7px;")
-        self.btn_popout.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self.btn_popout.customContextMenuRequested.connect(self._show_popout_menu)
-
-
-
-        self.btn_gumball = QPushButton(tr("Gumball"))
-        gumball_icon_path = os.path.join(os.path.dirname(__file__), "icons", "dark", "gumball.png")
-        if not os.path.exists(gumball_icon_path):
-            gumball_icon_path = os.path.expandvars(r"%APPDATA%\IngeTrazo\plugins\gumball\gumball.png")
-        if os.path.exists(gumball_icon_path):
-            self.btn_gumball.setIcon(QIcon(gumball_icon_path))
-            self.btn_gumball.setIconSize(QSize(16, 16))
-
-        self.btn_gumball.setToolTip(tr("Toggle 3D Viewport Gumball Manipulator (Alt+G)"))
-
-        self.btn_gumball.setCheckable(True)
-
-        ctrl = self._find_gumball_controller()
-        initial_gumball = getattr(ctrl, "enabled", True) if ctrl is not None else True
-        self.btn_gumball.setChecked(initial_gumball)
-
-        self.btn_gumball.setStyleSheet("""
-            QPushButton {
-                background: #2c313a;
-                color: #dcdfe4;
-                border: 1px solid #3e4451;
-                border-radius: 4px;
-                padding: 3px 8px;
-                font-size: 11px;
-                font-weight: 500;
-            }
-            QPushButton:hover {
-                background: #3e4451;
-                color: #ffffff;
-                border-color: #61afef;
-            }
-            QPushButton:checked {
-                background: #233b2c;
-                color: #a8e6b5;
-                border: 1px solid #48b870;
-                font-weight: 600;
-            }
-            QPushButton:checked:hover {
-                background: #294734;
-                border: 1px solid #58cf84;
-            }
-        """)
 
 
 
@@ -9380,10 +9361,6 @@ class NodeEditorWidget(QWidget):
             bar_layout.addWidget(b)
 
         bar_layout.addWidget(self.chk_live)
-
-        bar_layout.addWidget(self.btn_popout)
-
-        bar_layout.addWidget(self.btn_gumball)
 
         bar_layout.addWidget(self.btn_lang)
 
@@ -10253,7 +10230,7 @@ class NodeEditorWidget(QWidget):
 
         if hasattr(self, "btn_gumball"):
 
-            self.btn_gumball.setText(tr("Gumball"))
+            self.btn_gumball.setText("")
 
             self.btn_gumball.setToolTip(tr("Toggle 3D Viewport Gumball Manipulator (Alt+G)"))
 
