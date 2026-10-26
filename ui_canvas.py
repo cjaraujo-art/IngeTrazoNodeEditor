@@ -9146,135 +9146,139 @@ class NodeEditorWidget(QWidget):
 
 
 
-        # File management: Open, Save, Save As placed BEFORE Add
+        is_dark = True
+        if self.get_app is not None:
+            try:
+                app_obj = self.get_app()
+                if hasattr(app_obj, "theme") and isinstance(app_obj.theme, str):
+                    is_dark = "dark" in app_obj.theme.lower()
+            except Exception:
+                pass
 
+        # Side Toolbar (vertical menu on the left side of the canvas)
+        self.side_toolbar = QFrame(self)
+        self.side_toolbar.setObjectName("canvasSideToolbar")
+        self.side_toolbar.setFixedWidth(44)
+        self.side_toolbar.setStyleSheet("""
+            #canvasSideToolbar {
+                background: #1e2227;
+                border-right: 1px solid #333842;
+            }
+            QPushButton {
+                background: #282c34;
+                color: #abb2bf;
+                border: 1px solid #3e4451;
+                border-radius: 5px;
+                min-width: 32px;
+                max-width: 32px;
+                min-height: 32px;
+                max-height: 32px;
+                font-size: 16px;
+                padding: 0px;
+            }
+            QPushButton:hover {
+                background: #3e4451;
+                color: #ffffff;
+                border-color: #61afef;
+            }
+            QPushButton:pressed {
+                background: #21252b;
+            }
+            QPushButton:checked {
+                background: #233b2c;
+                color: #a8e6b5;
+                border: 1px solid #48b870;
+            }
+            QPushButton:checked:hover {
+                background: #294734;
+                border: 1px solid #58cf84;
+            }
+        """)
+
+        side_layout = QVBoxLayout(self.side_toolbar)
+        side_layout.setContentsMargins(5, 6, 5, 6)
+        side_layout.setSpacing(6)
+        side_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+
+        def _make_v_sep() -> QFrame:
+            s = QFrame()
+            s.setFixedHeight(1)
+            s.setStyleSheet("background: #333842; margin: 2px 2px;")
+            return s
+
+        # File management: Open, Save, Save As
         self.btn_load = QPushButton("📂")
-
         self.btn_load.setToolTip(tr("Open Graph from file (Ctrl+O)"))
 
-
-
         self.btn_save = QPushButton("💾")
-
         self.btn_save.setToolTip(tr("Save Graph immediately (Ctrl+S)"))
 
-
-
-        self.btn_save_as = QPushButton(tr("💾 As"))
-
+        self.btn_save_as = QPushButton()
         self.btn_save_as.setToolTip(tr("Save Graph As... (Ctrl+Shift+S)"))
+        save_as_icon_path = os.path.join(os.path.dirname(__file__), "icons", "dark" if is_dark else "light", "save_as.png")
+        if os.path.exists(save_as_icon_path):
+            self.btn_save_as.setIcon(QIcon(save_as_icon_path))
+            self.btn_save_as.setIconSize(QSize(20, 20))
+        else:
+            self.btn_save_as.setText("💾✎")
 
+        # History: Undo, Redo
         self.btn_undo = QPushButton("↺")
         self.btn_undo.setToolTip(tr("Undo (Ctrl+Z)"))
+        self.btn_undo.setStyleSheet("font-size: 18px; font-weight: bold;")
 
         self.btn_redo = QPushButton("↻")
         self.btn_redo.setToolTip(tr("Redo (Ctrl+Y)"))
+        self.btn_redo.setStyleSheet("font-size: 18px; font-weight: bold;")
 
+        # Canvas tools: Fit, Minimap, Reload
+        self.btn_fit = QPushButton("🔎")
+        self.btn_fit.setToolTip(tr("Fit all nodes in view (F)"))
 
-
-        self.btn_add = QPushButton(tr("➕ Add"))
-
-        self.btn_add.setToolTip(tr("Add Node (Space or Tab)"))
+        self.btn_minimap = QPushButton("🗺️")
+        self.btn_minimap.setToolTip(tr("Toggle Overview Minimap"))
+        self.btn_minimap.setCheckable(True)
+        self.btn_minimap.setChecked(False)
 
         self.btn_reload = QPushButton("🔄")
-
         self.btn_reload.setToolTip(tr("Reload Nodes catalog"))
 
+        side_layout.addWidget(self.btn_load)
+        side_layout.addWidget(self.btn_save)
+        side_layout.addWidget(self.btn_save_as)
+        side_layout.addWidget(_make_v_sep())
+        side_layout.addWidget(self.btn_undo)
+        side_layout.addWidget(self.btn_redo)
+        side_layout.addWidget(_make_v_sep())
+        side_layout.addWidget(self.btn_fit)
+        side_layout.addWidget(self.btn_minimap)
+        side_layout.addWidget(self.btn_reload)
+        side_layout.addStretch(1)
+
+        self.btn_add = QPushButton(tr("➕ Add"))
+        self.btn_add.setToolTip(tr("Add Node (Space or Tab)"))
+
         self.btn_custom = QPushButton(tr("🧩 Custom"))
-
         self.btn_custom.setToolTip(tr("Custom Nodes: Open folder or create new node from template"))
-
         self.btn_custom.setStyleSheet("background: #2c313a; color: #61afef; border: 1px solid #3e4451; border-radius: 4px; padding: 3px 8px; font-size: 11px; font-weight: 500;")
 
         self.chk_live = QCheckBox(tr("🔴 Live"))
-
         self.chk_live.setToolTip(tr("Live Viewport Sync (60 FPS)"))
-
         self.chk_live.setStyleSheet("color: #e5c07b; font-size: 11px;")
-
         self.chk_live.setChecked(True)
 
-
-
         self.btn_bake = QPushButton(tr("🥐 Bake"))
-
         self.btn_bake.setToolTip(tr("Bake current solids to IngeTrazo Scene"))
-
         self.btn_bake.setStyleSheet("background: #2e7d32; color: white; font-weight: bold; border-radius: 4px; padding: 3px 9px;")
 
-
-
         self.btn_load_group = QPushButton(tr("📥 From Group"))
-
         self.btn_load_group.setToolTip(tr("Load embedded graph from selected IngeTrazo Group"))
 
-
-
         self.btn_popout = QPushButton(tr("⧉ Pop out"))
-
         self.btn_popout.setToolTip(tr("Pop out into movable floating window (multi-monitor support)"))
-
         self.btn_popout.setStyleSheet("background: #3b4252; color: #61afef; border-radius: 4px; padding: 3px 7px;")
-
         self.btn_popout.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-
         self.btn_popout.customContextMenuRequested.connect(self._show_popout_menu)
-
-
-
-        self.btn_fit = QPushButton(tr("🔎 Fit"))
-
-        self.btn_fit.setToolTip(tr("Fit all nodes in view (F)"))
-
-        self.btn_fit.setStyleSheet("background: #2c313a; color: #88c0d0; border-radius: 4px; padding: 3px 7px;")
-
-
-
-        self.btn_minimap = QPushButton(tr("🗺️ Map"))
-
-        self.btn_minimap.setToolTip(tr("Toggle Minimap (navigation overview)"))
-
-        self.btn_minimap.setCheckable(True)
-
-        self.btn_minimap.setChecked(False)  # Disabled by default
-
-        self.btn_minimap.setStyleSheet("""
-
-            QPushButton {
-
-                background: #2c313a;
-
-                color: #88c0d0;
-
-                border: 1px solid #3e4451;
-
-                border-radius: 4px;
-
-                padding: 3px 7px;
-
-                font-size: 11px;
-
-            }
-
-            QPushButton:hover {
-
-                background: #3e4451;
-
-                color: #ffffff;
-
-            }
-
-            QPushButton:checked {
-
-                background: #3e4451;
-
-                color: #61afef;
-
-                border-color: #61afef;
-
-            }
-
-        """)
 
 
 
@@ -9371,17 +9375,13 @@ class NodeEditorWidget(QWidget):
 
         bar_layout.addWidget(self.btn_ribbon_toggle)
 
-        for b in (self.btn_load, self.btn_save, self.btn_save_as, self.btn_undo, self.btn_redo, self.btn_add, self.btn_reload, self.btn_custom, self.btn_bake, self.btn_load_group):
+        for b in (self.btn_add, self.btn_custom, self.btn_bake, self.btn_load_group):
 
             bar_layout.addWidget(b)
 
         bar_layout.addWidget(self.chk_live)
 
         bar_layout.addWidget(self.btn_popout)
-
-        bar_layout.addWidget(self.btn_fit)
-
-        bar_layout.addWidget(self.btn_minimap)
 
         bar_layout.addWidget(self.btn_gumball)
 
@@ -9443,7 +9443,14 @@ class NodeEditorWidget(QWidget):
 
         """)
 
-        self.splitter.addWidget(self.view)
+        self.canvas_container = QWidget(self)
+        canvas_h_layout = QHBoxLayout(self.canvas_container)
+        canvas_h_layout.setContentsMargins(0, 0, 0, 0)
+        canvas_h_layout.setSpacing(0)
+        canvas_h_layout.addWidget(self.side_toolbar)
+        canvas_h_layout.addWidget(self.view, stretch=1)
+
+        self.splitter.addWidget(self.canvas_container)
 
         self.splitter.addWidget(self.inspector)
 
@@ -9462,24 +9469,6 @@ class NodeEditorWidget(QWidget):
         self.splitter.user_collapsed = True  # Node properties disabled by default
 
         self.splitter.collapse_panel()
-
-
-
-        is_dark = True
-
-        if self.get_app is not None:
-
-            try:
-
-                app_obj = self.get_app()
-
-                if hasattr(app_obj, "theme") and isinstance(app_obj.theme, str):
-
-                    is_dark = "dark" in app_obj.theme.lower()
-
-            except Exception:
-
-                pass
 
 
 
@@ -10242,8 +10231,6 @@ class NodeEditorWidget(QWidget):
 
         if hasattr(self, "btn_save_as"):
 
-            self.btn_save_as.setText(tr("💾 As"))
-
             self.btn_save_as.setToolTip(tr("Save Graph As... (Ctrl+Shift+S)"))
 
         if hasattr(self, "btn_undo"):
@@ -10256,15 +10243,13 @@ class NodeEditorWidget(QWidget):
 
         self.btn_load_group.setToolTip(tr("Load embedded graph from selected IngeTrazo Group"))
 
-        self.btn_fit.setText(tr("🔎 Fit"))
+        if hasattr(self, "btn_fit"):
 
-        self.btn_fit.setToolTip(tr("Fit all nodes in view (F)"))
+            self.btn_fit.setToolTip(tr("Fit all nodes in view (F)"))
 
         if hasattr(self, "btn_minimap"):
 
-            self.btn_minimap.setText(tr("🗺️ Map"))
-
-            self.btn_minimap.setToolTip(tr("Toggle Minimap (navigation overview)"))
+            self.btn_minimap.setToolTip(tr("Toggle Overview Minimap"))
 
         if hasattr(self, "btn_gumball"):
 
