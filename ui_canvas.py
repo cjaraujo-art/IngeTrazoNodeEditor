@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import ast
 
+import json
 import math
 
 import operator
@@ -3685,6 +3686,9 @@ class NodeCanvasScene(QGraphicsScene):
             return
 
         super().mouseReleaseEvent(event)
+        cb = getattr(self, "on_user_edit", None)
+        if cb is not None:
+            cb()
 
 
 
@@ -3733,6 +3737,94 @@ class NodeCanvasScene(QGraphicsScene):
         self.trigger_eval()
 
 
+
+
+
+class GraphHistory:
+    """Undo / redo for node-graph edits (Ctrl+Z / Ctrl+Y on the canvas).
+
+    Keeps JSON snapshots of GraphEngine.to_dict(). Edits arrive through note_change(); a short timer
+    coalesces bursts (a slider drag becomes one step) and only pushes a snapshot when the graph really changed.
+    """
+
+    LIMIT = 100
+
+    def __init__(self, editor: Any) -> None:
+        self.editor = editor
+        self._undo: List[str] = []
+        self._redo: List[str] = []
+        self._restoring = False
+        self._cur = self._snapshot()
+        self._timer = QTimer()
+        self._timer.setSingleShot(True)
+        self._timer.setInterval(350)
+        self._timer.timeout.connect(self._commit)
+
+    def _snapshot(self) -> str:
+        return json.dumps(self.editor.engine.to_dict(), sort_keys=True)
+
+    @staticmethod
+    def _key(snap: str) -> str:
+        """Comparison key: 0 and 0.0 count as equal (positions come back as floats after a reload)."""
+        def norm(v: Any) -> Any:
+            if isinstance(v, bool):
+                return v
+            if isinstance(v, (int, float)):
+                return float(v)
+            if isinstance(v, list):
+                return [norm(x) for x in v]
+            if isinstance(v, dict):
+                return {k: norm(x) for k, x in v.items()}
+            return v
+        return json.dumps(norm(json.loads(snap)), sort_keys=True)
+
+    def note_change(self) -> None:
+        if not self._restoring:
+            self._timer.start()
+
+    def reset(self) -> None:
+        """Forget the history (a new graph was loaded)."""
+        self._timer.stop()
+        self._undo.clear()
+        self._redo.clear()
+        self._cur = self._snapshot()
+
+    def _commit(self) -> None:
+        if self._restoring:
+            return
+        snap = self._snapshot()
+        if self._key(snap) != self._key(self._cur):
+            self._undo.append(self._cur)
+            del self._undo[:-self.LIMIT]
+            self._cur = snap
+            self._redo.clear()
+
+    def _apply(self, snap: str) -> None:
+        self._restoring = True
+        try:
+            self.editor.engine.load_dict(json.loads(snap))
+            self.editor.scene.rebuild_from_engine()
+        finally:
+            self._restoring = False
+        self._cur = snap
+
+    def undo(self) -> bool:
+        self._timer.stop()
+        self._commit()
+        if not self._undo:
+            return False
+        self._redo.append(self._cur)
+        self._apply(self._undo.pop())
+        return True
+
+    def redo(self) -> bool:
+        self._timer.stop()
+        self._commit()
+        if not self._redo:
+            return False
+        self._undo.append(self._cur)
+        self._apply(self._redo.pop())
+        return True
 
 
 
@@ -4700,6 +4792,19 @@ class NodeCanvasView(QGraphicsView):
 
 
 
+    def event(self, e) -> bool:
+        # Claim Ctrl+Z / Ctrl+Y so the host window's own undo shortcut does not swallow them.
+        if e.type() == QEvent.Type.ShortcutOverride and not isinstance(self.scene().focusItem(), QGraphicsProxyWidget):
+            if (e.modifiers() & Qt.KeyboardModifier.ControlModifier) and e.key() in (Qt.Key.Key_Z, Qt.Key.Key_Y):
+                e.accept()
+                return True
+        return super().event(e)
+
+    def _graph_undo_redo(self, redo: bool) -> None:
+        hist = getattr(getattr(self, "parent_editor", None), "history", None)
+        if hist is not None:
+            hist.redo() if redo else hist.undo()
+
     def keyPressEvent(self, event: QKeyEvent) -> None:
 
         if isinstance(self.scene().focusItem(), QGraphicsProxyWidget):
@@ -4711,6 +4816,14 @@ class NodeCanvasView(QGraphicsView):
 
 
         ctrl = bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
+        if ctrl and event.key() == Qt.Key.Key_Z:
+            self._graph_undo_redo(bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier))
+            event.accept()
+            return
+        if ctrl and event.key() == Qt.Key.Key_Y:
+            self._graph_undo_redo(True)
+            event.accept()
+            return
 
 
 
@@ -9270,6 +9383,8 @@ class NodeEditorWidget(QWidget):
         self.scene = NodeCanvasScene(self.engine, self.schedule_eval, on_bake=self.on_bake, get_app=self.get_app)
 
         self.view = NodeCanvasView(self.scene)
+        self.history = GraphHistory(self)
+        self.scene.on_user_edit = self.history.note_change
 
         self.view.parent_editor = self
 
@@ -9694,6 +9809,10 @@ class NodeEditorWidget(QWidget):
 
 
     def schedule_eval(self) -> None:
+
+        hist = getattr(self, "history", None)
+        if hist is not None:
+            hist.note_change()
 
         self._eval_timer.start()
 
@@ -10256,6 +10375,7 @@ class NodeEditorWidget(QWidget):
                 self.engine.load_file(path)
 
                 self.scene.rebuild_from_engine()
+                self.history.reset()
 
                 self.current_file_path = path
 
@@ -10290,3 +10410,6 @@ class NodeEditorWidget(QWidget):
         self.engine.connect(c.id, "mesh", o.id, "mesh")
 
         self.scene.rebuild_from_engine()
+        hist = getattr(self, "history", None)
+        if hist is not None:
+            hist.reset()
