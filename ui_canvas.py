@@ -3761,7 +3761,7 @@ class GraphHistory:
         self._timer.timeout.connect(self._commit)
 
     def _snapshot(self) -> str:
-        return json.dumps(self.editor.engine.to_dict(), sort_keys=True)
+        return json.dumps(self.editor.engine.to_dict(), sort_keys=True, default=str)
 
     @staticmethod
     def _key(snap: str) -> str:
@@ -3801,9 +3801,16 @@ class GraphHistory:
 
     def _apply(self, snap: str) -> None:
         self._restoring = True
+        selected_ids = [
+            it.node.id for it in self.editor.scene.node_items.values() if it.isSelected()
+        ]
         try:
             self.editor.engine.load_dict(json.loads(snap))
             self.editor.scene.rebuild_from_engine()
+            for nid in selected_ids:
+                item = self.editor.scene.node_items.get(nid)
+                if item is not None:
+                    item.setSelected(True)
         finally:
             self._restoring = False
         self._cur = snap
@@ -9157,6 +9164,12 @@ class NodeEditorWidget(QWidget):
 
         self.btn_save_as.setToolTip(tr("Save Graph As... (Ctrl+Shift+S)"))
 
+        self.btn_undo = QPushButton("↺")
+        self.btn_undo.setToolTip(tr("Undo (Ctrl+Z)"))
+
+        self.btn_redo = QPushButton("↻")
+        self.btn_redo.setToolTip(tr("Redo (Ctrl+Y)"))
+
 
 
         self.btn_add = QPushButton(tr("➕ Add"))
@@ -9358,7 +9371,7 @@ class NodeEditorWidget(QWidget):
 
         bar_layout.addWidget(self.btn_ribbon_toggle)
 
-        for b in (self.btn_load, self.btn_save, self.btn_save_as, self.btn_add, self.btn_reload, self.btn_custom, self.btn_bake, self.btn_load_group):
+        for b in (self.btn_load, self.btn_save, self.btn_save_as, self.btn_undo, self.btn_redo, self.btn_add, self.btn_reload, self.btn_custom, self.btn_bake, self.btn_load_group):
 
             bar_layout.addWidget(b)
 
@@ -9555,6 +9568,9 @@ class NodeEditorWidget(QWidget):
         self.btn_save.clicked.connect(self._save_graph)
 
         self.btn_save_as.clicked.connect(self._save_as_graph)
+
+        self.btn_undo.clicked.connect(lambda: self.history.undo() if hasattr(self, "history") else None)
+        self.btn_redo.clicked.connect(lambda: self.history.redo() if hasattr(self, "history") else None)
 
 
 
@@ -9805,6 +9821,10 @@ class NodeEditorWidget(QWidget):
         if self.on_load_selection:
 
             self.on_load_selection()
+
+            hist = getattr(self, "history", None)
+            if hist is not None:
+                hist.reset()
 
 
 
@@ -10225,6 +10245,12 @@ class NodeEditorWidget(QWidget):
             self.btn_save_as.setText(tr("💾 As"))
 
             self.btn_save_as.setToolTip(tr("Save Graph As... (Ctrl+Shift+S)"))
+
+        if hasattr(self, "btn_undo"):
+            self.btn_undo.setToolTip(tr("Undo (Ctrl+Z)"))
+
+        if hasattr(self, "btn_redo"):
+            self.btn_redo.setToolTip(tr("Redo (Ctrl+Y)"))
 
         self.btn_load_group.setText(tr("📥 From Group"))
 
