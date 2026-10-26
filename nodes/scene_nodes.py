@@ -773,6 +773,294 @@ class SelectCurveNode(BaseNode):
 NODE_REGISTRY["curve.select"] = SelectCurveNode
 
 
+# ============================================================================
+# Select Solid Node (Scene Tab - Multi-Solid / Group Selection)
+# ============================================================================
+@register_node
+class SelectSolidNode(BaseNode):
+    type_id = "scene.select_solid"
+    title = "Select Solid"
+    category = "Scene"
+    description = (
+        "Select or reference existing solid(s), groups, or meshes from the IngeTrazo 3D viewport into the node graph.\n"
+        "Supports selecting multiple solids or groups at once.\n"
+        "Click '📌 Set Selected Solid(s)' to store the active viewport selection.\n"
+        "Live tracking automatically keeps geometry in sync when moved or edited in the scene.\n"
+        "Outputs referenced solid MeshData, individual edges as curves, wireframe preview, and edge indices."
+    )
+    header_color = (94, 129, 172)
+
+    inputs = [
+        InputSpec("name", "Name", SocketType.STRING, default="Referenced_Solid"),
+        InputSpec("live_sync", "Live Tracking", SocketType.BOOL, default=True),
+    ]
+    outputs = [
+        OutputSpec("solid", "Solid", SocketType.MESH),
+        OutputSpec("solids", "Solids", SocketType.ANY),
+        OutputSpec("edges", "Edges", SocketType.ANY),
+        OutputSpec("wireframe", "Wireframe", SocketType.MESH),
+        OutputSpec("indices", "Edge Indices", SocketType.ANY),
+        OutputSpec("edge_count", "Edge Count", SocketType.INT),
+        OutputSpec("count", "Solid Count", SocketType.INT),
+    ]
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._live_targets: Optional[List[Any]] = None
+        self._app_ref: Any = None
+
+    def get_action_buttons(self) -> List[Dict[str, Any]]:
+        return [
+            {
+                "id": "btn_set_solid",
+                "label": "📌 Set Selected Solid(s)",
+                "tooltip": "Store currently selected solid(s), group(s), or mesh(es) from IngeTrazo 3D viewport",
+                "color": "#2b5278",
+                "action": "set_solid",
+            },
+            {
+                "id": "btn_sync_solid",
+                "label": "🔄 Update from Scene",
+                "tooltip": "Re-read live positions of referenced solid(s) from scene",
+                "color": "#3b6e50",
+                "action": "sync_solid",
+            },
+            {
+                "id": "btn_clear_solid",
+                "label": "❌ Clear Solid(s)",
+                "tooltip": "Clear stored solid(s) back to default",
+                "color": "#4c566a",
+                "action": "clear_solid",
+            },
+        ]
+
+    def get_card_badge_text(self) -> Optional[str]:
+        stored_list = self.param_values.get("stored_solids")
+        if not stored_list:
+            stored_single = self.param_values.get("stored_solid")
+            if stored_single and isinstance(stored_single, dict) and "vertices" in stored_single:
+                stored_list = [stored_single]
+
+        is_live = bool(getattr(self, "_live_targets", None))
+        prefix = "🔗 Live" if is_live else "📌 Stored"
+
+        if stored_list:
+            n_solids = len(stored_list)
+            total_edges = sum(len(s.get("edges", [])) for s in stored_list)
+            total_verts = sum(len(s.get("vertices", [])) for s in stored_list)
+            if n_solids > 1:
+                return f"{prefix}: {n_solids} solids ({total_edges} edges)"
+            return f"{prefix}: 1 solid ({total_edges} edges, {total_verts} verts)"
+        return "⚪ No solid referenced"
+
+    def _extract_meshdata_from_target(self, target: Any) -> Optional[MeshData]:
+        item = target
+        group = None
+        if isinstance(target, tuple) and len(target) == 2:
+            item, group = target
+
+        # 1. Try world_mesh from core.solids for Group / ComponentInstance
+        try:
+            from core.solids import world_mesh
+            if group is not None:
+                native_m = world_mesh(group)
+                if native_m:
+                    return MeshData.from_native_mesh(native_m, name=getattr(group, "name", "Solid"))
+            elif hasattr(item, "children") or hasattr(item, "prototype") or hasattr(item, "xform"):
+                native_m = world_mesh(item)
+                if native_m:
+                    return MeshData.from_native_mesh(native_m, name=getattr(item, "name", "Solid"))
+        except Exception:
+            pass
+
+        # 2. Extract from item.mesh with optional transform
+        if hasattr(item, "mesh") and hasattr(item.mesh, "faces"):
+            native_m = item.mesh
+            xform = getattr(item, "xform", None) or (getattr(group, "xform", None) if group else None)
+            md = MeshData.from_native_mesh(native_m, name=getattr(item, "name", "Solid"))
+            if xform is not None and hasattr(xform, "map"):
+                mapped_verts = []
+                for vx, vy, vz in md.vertices:
+                    try:
+                        from PySide6.QtGui import QVector3D
+                        pv = xform.map(QVector3D(vx, vy, vz))
+                        mapped_verts.append((float(pv.x()), float(pv.y()), float(pv.z())))
+                    except Exception:
+                        mapped_verts.append((vx, vy, vz))
+                md.vertices = mapped_verts
+            return md
+
+        # 3. Direct IngeTrazo Mesh object
+        if hasattr(item, "faces") and hasattr(item, "edges"):
+            return MeshData.from_native_mesh(item, name="Solid")
+
+        # 4. Pure MeshData
+        if isinstance(item, MeshData):
+            return item.copy()
+
+        return None
+
+    def _update_from_targets(self, targets: List[Any], scene: Any = None) -> bool:
+        collected: List[Dict[str, Any]] = []
+        for t in targets:
+            md = self._extract_meshdata_from_target(t)
+            if md and md.vertices:
+                collected.append({
+                    "vertices": md.vertices,
+                    "faces": md.faces,
+                    "edges": md.edges,
+                    "holed_faces": md.holed_faces,
+                    "name": md.name,
+                    "color": md.color,
+                    "material_name": md.material_name,
+                    "opacity": md.opacity,
+                })
+
+        if not collected:
+            return False
+
+        old_data = self.param_values.get("stored_solids")
+        if old_data == collected:
+            return False
+
+        self.param_values["stored_solids"] = collected
+        self.param_values["stored_solid"] = collected[0]
+        self.is_dirty = True
+        return True
+
+    def sync_from_scene(self, app: Any = None) -> bool:
+        """Re-reads live geometry from the referenced scene solid(s). Returns True if changed."""
+        targets = getattr(self, "_live_targets", None)
+        if not targets:
+            return False
+        app = app or getattr(self, "_app_ref", None)
+        if app is None:
+            try:
+                from PySide6.QtWidgets import QApplication
+                qapp = QApplication.instance()
+                app = getattr(qapp, "_extension_app_handle", None)
+            except Exception:
+                app = None
+        viewport = getattr(app, "viewport", None) if app else None
+        scene = getattr(viewport, "scene", None) or getattr(app, "scene", None) if app else None
+        return self._update_from_targets(targets, scene)
+
+    def reference_from_selection(self, app: Any = None) -> Tuple[str, bool]:
+        """Extract all selected solids/groups from the active IngeTrazo viewport and save into param_values."""
+        if app is None:
+            try:
+                from PySide6.QtWidgets import QApplication
+                qapp = QApplication.instance()
+                app = getattr(qapp, "_extension_app_handle", None)
+            except Exception:
+                app = None
+
+        if not app:
+            return ("No IngeTrazo app handle available", False)
+
+        viewport = getattr(app, "viewport", None)
+        scene = getattr(viewport, "scene", None) or getattr(app, "scene", None)
+        if not scene:
+            return ("No active scene found", False)
+
+        sel = getattr(scene, "selection", None) or getattr(viewport, "selection", None) or []
+        if not sel:
+            return ("Please select solid(s) or group(s) in IngeTrazo first!", False)
+
+        collected_targets: List[Any] = []
+        for item in sel:
+            if hasattr(item, "mesh") or hasattr(item, "faces") or hasattr(item, "children"):
+                collected_targets.append(item)
+            elif isinstance(item, tuple) and len(item) == 2:
+                collected_targets.append(item)
+
+        if not collected_targets:
+            return ("Selected item contains no 3D solids or meshes", False)
+
+        self._live_targets = collected_targets
+        self._app_ref = app
+        ok = self._update_from_targets(collected_targets, scene)
+        if not ok and "stored_solids" not in self.param_values:
+            return ("Could not extract 3D mesh from selection", False)
+
+        solids_data = self.param_values.get("stored_solids", [])
+        n_s = len(solids_data)
+        total_edges = sum(len(s.get("edges", [])) for s in solids_data)
+        total_verts = sum(len(s.get("vertices", [])) for s in solids_data)
+        if n_s > 1:
+            summary_txt = f"{n_s} solids ({total_edges} edges) [Live Linked]"
+        else:
+            summary_txt = f"1 solid ({total_edges} edges, {total_verts} verts) [Live Linked]"
+
+        return (f"Saved: {summary_txt}", True)
+
+    def clear_reference(self) -> None:
+        """Clear stored referenced solids and live link."""
+        self._live_targets = None
+        if "stored_solids" in self.param_values:
+            del self.param_values["stored_solids"]
+        if "stored_solid" in self.param_values:
+            del self.param_values["stored_solid"]
+        self.is_dirty = True
+
+    def compute(
+        self,
+        name: str = "Referenced_Solid",
+        live_sync: bool = True,
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
+        if live_sync and getattr(self, "_live_targets", None):
+            self.sync_from_scene()
+
+        stored_list = self.param_values.get("stored_solids")
+        if not stored_list:
+            stored_single = self.param_values.get("stored_solid")
+            if stored_single and isinstance(stored_single, dict) and "vertices" in stored_single:
+                stored_list = [stored_single]
+
+        solids: List[MeshData] = []
+        if stored_list:
+            for s_dict in stored_list:
+                md = MeshData(
+                    vertices=[(float(v[0]), float(v[1]), float(v[2])) for v in s_dict.get("vertices", [])],
+                    faces=[list(f) for f in s_dict.get("faces", [])],
+                    edges=[(int(e[0]), int(e[1])) for e in s_dict.get("edges", [])],
+                    holed_faces=s_dict.get("holed_faces", []),
+                    name=s_dict.get("name", name or "ReferencedSolid"),
+                    color=s_dict.get("color"),
+                    material_name=s_dict.get("material_name", ""),
+                    opacity=s_dict.get("opacity"),
+                )
+                if md.vertices:
+                    solids.append(md)
+
+        if not solids:
+            box = MeshData.create_box(origin=Vec3(0, 0, 0), dx=2.0, dy=2.0, dz=1.5)
+            box.name = name or "DefaultSolid"
+            solids = [box]
+
+        primary_solid = solids[0]
+        edges_curves = primary_solid.extract_edges_as_curves()
+        wireframe = primary_solid.extract_wireframe_mesh(name=f"{primary_solid.name}_Wireframe")
+        indices = list(range(len(primary_solid.edges)))
+
+        return {
+            "solid": primary_solid,
+            "solids": solids,
+            "edges": edges_curves,
+            "wireframe": wireframe,
+            "indices": indices,
+            "edge_count": len(primary_solid.edges),
+            "count": len(solids),
+        }
+
+
+# Register backward compatibility aliases for select solid
+NODE_REGISTRY["scene.select_solid"] = SelectSolidNode
+NODE_REGISTRY["solid.select"] = SelectSolidNode
+NODE_REGISTRY["solid.select_solid"] = SelectSolidNode
+
+
 @register_node
 class PreviewNode(BaseNode):
     type_id = "scene.preview"

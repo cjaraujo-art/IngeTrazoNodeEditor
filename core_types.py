@@ -372,7 +372,148 @@ class MeshData:
             if m.ifc_class and not result.ifc_class:
                 result.ifc_class = m.ifc_class
         return result
-        return result
+
+    def extract_edges_as_curves(self) -> List[CurveData]:
+        """Returns each edge of this mesh as a 2-point CurveData."""
+        res: List[CurveData] = []
+        for i0, i1 in self.edges:
+            if 0 <= i0 < len(self.vertices) and 0 <= i1 < len(self.vertices):
+                p0 = Vec3(float(self.vertices[i0][0]), float(self.vertices[i0][1]), float(self.vertices[i0][2]))
+                p1 = Vec3(float(self.vertices[i1][0]), float(self.vertices[i1][1]), float(self.vertices[i1][2]))
+                res.append(CurveData(points=[p0, p1], closed=False))
+        return res
+
+    def extract_wireframe_mesh(self, name: str = "Wireframe") -> MeshData:
+        """Returns a lightweight wireframe MeshData containing only vertices and edges."""
+        return MeshData(
+            vertices=list(self.vertices),
+            faces=[],
+            edges=list(self.edges),
+            name=name,
+            color=self.color or (0.25, 0.65, 0.95),
+            opacity=self.opacity,
+        )
+
+    def to_native_mesh(self) -> Any:
+        """Converts this MeshData into an IngeTrazo core.mesh.Mesh instance."""
+        try:
+            from core.mesh import Mesh
+            from PySide6.QtGui import QVector3D
+        except ImportError:
+            return None
+
+        m = Mesh()
+        qvecs = [QVector3D(float(x), float(y), float(z)) for (x, y, z) in self.vertices]
+
+        if self.holed_faces:
+            for face_indices in self.faces:
+                valid_qvecs = [qvecs[idx] for idx in face_indices if 0 <= idx < len(qvecs)]
+                if len(valid_qvecs) >= 3:
+                    try:
+                        m.add_face(valid_qvecs)
+                    except Exception:
+                        pass
+            for outer_idx, hole_idx_list in self.holed_faces:
+                outer_qvecs = [qvecs[i] for i in outer_idx if 0 <= i < len(qvecs)]
+                holes_qvecs = [[qvecs[i] for i in h if 0 <= i < len(qvecs)] for h in hole_idx_list]
+                if len(outer_qvecs) >= 3:
+                    try:
+                        m.add_face(outer_qvecs, hole_loops=holes_qvecs if holes_qvecs else None)
+                    except Exception:
+                        pass
+        elif self.faces:
+            for face_indices in self.faces:
+                valid_qvecs = [qvecs[idx] for idx in face_indices if 0 <= idx < len(qvecs)]
+                if len(valid_qvecs) >= 3:
+                    try:
+                        m.add_face(valid_qvecs)
+                    except Exception:
+                        pass
+        elif self.outer:
+            outer_qvecs = [QVector3D(float(p[0]), float(p[1]), float(p[2])) for p in self.outer]
+            holes_qvecs = [[QVector3D(float(p[0]), float(p[1]), float(p[2])) for p in h] for h in (self.holes or [])]
+            if len(outer_qvecs) >= 3:
+                try:
+                    m.add_face(outer_qvecs, hole_loops=holes_qvecs if holes_qvecs else None)
+                except Exception:
+                    pass
+
+        if hasattr(m, "edges") and not m.edges and self.edges:
+            for i0, i1 in self.edges:
+                if 0 <= i0 < len(qvecs) and 0 <= i1 < len(qvecs):
+                    try:
+                        m.add_edge(qvecs[i0], qvecs[i1])
+                    except Exception:
+                        pass
+        return m
+
+    @classmethod
+    def from_native_mesh(cls, native_mesh: Any, name: str = "Solid") -> MeshData:
+        """Converts an IngeTrazo core.mesh.Mesh instance into a MeshData."""
+        vert_map = {}
+        vertices = []
+
+        def get_v_idx(qv: Any) -> int:
+            pos = getattr(qv, "position", qv)
+            if hasattr(pos, "x"):
+                x = float(pos.x() if callable(pos.x) else pos.x)
+                y = float(pos.y() if callable(pos.y) else pos.y)
+                z = float(pos.z() if callable(pos.z) else pos.z)
+            elif isinstance(pos, (list, tuple)) and len(pos) >= 3:
+                x, y, z = float(pos[0]), float(pos[1]), float(pos[2])
+            else:
+                x, y, z = 0.0, 0.0, 0.0
+            key = (round(x, 6), round(y, 6), round(z, 6))
+            if key not in vert_map:
+                vert_map[key] = len(vertices)
+                vertices.append((x, y, z))
+            return vert_map[key]
+
+        faces = []
+        holed_faces = []
+        for f in getattr(native_mesh, "faces", []):
+            f_verts = getattr(f, "vertices", None)
+            if f_verts is None:
+                f_loop = getattr(f, "loop", None)
+                f_verts = [getattr(v, "position", v) for v in f_loop] if f_loop else []
+            outer_idx = [get_v_idx(v) for v in f_verts]
+            holes_idx = []
+            for h in getattr(f, "hole_loops", None) or getattr(f, "holes", None) or []:
+                h_v = [get_v_idx(hv) for hv in h]
+                if len(h_v) >= 3:
+                    holes_idx.append(h_v)
+            if holes_idx:
+                holed_faces.append((outer_idx, holes_idx))
+            if len(outer_idx) >= 3:
+                faces.append(outer_idx)
+
+        edges = []
+        for e in getattr(native_mesh, "edges", []):
+            p0 = getattr(e, "v0", None)
+            p1 = getattr(e, "v1", None)
+            if p0 is not None and p1 is not None:
+                i0 = get_v_idx(p0)
+                i1 = get_v_idx(p1)
+                edges.append((i0, i1))
+
+        if not edges and faces:
+            seen_edges = set()
+            for face in faces:
+                k = len(face)
+                for i in range(k):
+                    a, b = face[i], face[(i + 1) % k]
+                    undir = (min(a, b), max(a, b))
+                    if undir not in seen_edges:
+                        seen_edges.add(undir)
+                        edges.append(undir)
+
+        return cls(
+            vertices=vertices,
+            faces=faces,
+            edges=edges,
+            holed_faces=holed_faces,
+            name=name,
+        )
 
     @staticmethod
     def create_box(

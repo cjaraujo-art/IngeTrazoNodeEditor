@@ -2410,3 +2410,400 @@ class InterpolateCurveNode(ViewportCurveNodeBase):
 
 NODE_REGISTRY["curve.nurbs_curve"] = NurbsCurveNode
 NODE_REGISTRY["curve.spline"] = InterpolateCurveNode
+
+
+# ============================================================================
+# Fillet & Chamfer Mathematical Helpers for 3D Polylines & Face Loops
+# ============================================================================
+def _parse_index_set(indices_val: Any) -> Optional[set[int]]:
+    """Parses int, list/tuple/set of ints, or comma-separated string into a set of integers."""
+    if indices_val is None or indices_val == "":
+        return None
+    if isinstance(indices_val, (int, float)):
+        return {int(indices_val)}
+    if isinstance(indices_val, (list, tuple, set)):
+        res = set()
+        for x in indices_val:
+            if isinstance(x, (int, float)):
+                res.add(int(x))
+            elif isinstance(x, str) and (x.strip().isdigit() or (x.strip().startswith("-") and x.strip()[1:].isdigit())):
+                res.add(int(x.strip()))
+        return res if res else None
+    if isinstance(indices_val, str):
+        s = indices_val.strip()
+        if not s or s.lower() in ("all", "none", "*"):
+            return None
+        parts = s.replace(";", ",").split(",")
+        res = set()
+        for p in parts:
+            p = p.strip()
+            if p and (p.isdigit() or (p.startswith("-") and p[1:].isdigit())):
+                res.add(int(p))
+        return res if res else None
+    return None
+
+
+def _fillet_polyline(
+    pts: List[Vec3],
+    closed: bool,
+    radius: float,
+    segments: int = 4,
+    indices: Optional[set[int]] = None,
+) -> List[Vec3]:
+    """
+    Fillets the sharp corners of a 3D polyline (open or closed) with circular arcs.
+    Uses Rodrigues rotation in 3D so arbitrary 3D orientations are preserved.
+    """
+    n = len(pts)
+    if n < (3 if closed else 3):
+        return [Vec3(p.x, p.y, p.z) for p in pts]
+
+    r = max(1e-5, float(radius))
+    seg = max(1, min(32, int(segments)))
+
+    out: List[Vec3] = []
+    start_i = 0 if closed else 1
+    end_i = n if closed else n - 1
+
+    if not closed:
+        out.append(pts[0])
+
+    for i in range(start_i, end_i):
+        p_curr = pts[i]
+        p_prev = pts[(i - 1 + n) % n]
+        p_next = pts[(i + 1) % n]
+
+        # Check vertex index filter
+        if indices is not None and i not in indices:
+            out.append(p_curr)
+            continue
+
+        v1 = p_curr - p_prev
+        v2 = p_next - p_curr
+        l1 = v1.length()
+        l2 = v2.length()
+        if l1 < 1e-6 or l2 < 1e-6:
+            out.append(p_curr)
+            continue
+
+        u1 = v1 * (1.0 / l1)
+        u2 = v2 * (1.0 / l2)
+        dot = max(-1.0, min(1.0, u1.dot(u2)))
+
+        # Collinear (straight line) or folded 180° back
+        if dot > 0.9999 or dot < -0.9999:
+            out.append(p_curr)
+            continue
+
+        tan_half = math.sqrt(max(1e-9, (1.0 + dot) / (1.0 - dot)))
+        t = r / tan_half
+        # Clamp tangent length to 48% of adjacent segment lengths to prevent overlap
+        t_clamped = min(t, 0.48 * l1, 0.48 * l2)
+        r_eff = t_clamped * tan_half
+
+        pa = p_curr - u1 * t_clamped
+        pb = p_curr + u2 * t_clamped
+
+        bisect = (u2 - u1).normalized()
+        d_c = math.sqrt(t_clamped * t_clamped + r_eff * r_eff)
+        center = p_curr + bisect * d_c
+
+        norm = u1.cross(u2).normalized()
+        ra = pa - center
+        rb = pb - center
+
+        cos_beta = max(-1.0, min(1.0, (ra.normalized()).dot(rb.normalized())))
+        beta = math.acos(cos_beta)
+
+        if ra.cross(rb).dot(norm) < 0:
+            norm = norm * -1.0
+
+        for s in range(seg + 1):
+            theta = beta * (s / seg)
+            cos_t = math.cos(theta)
+            sin_t = math.sin(theta)
+            rotated = ra * cos_t + norm.cross(ra) * sin_t + norm * (norm.dot(ra)) * (1.0 - cos_t)
+            out.append(center + rotated)
+
+    if not closed:
+        out.append(pts[-1])
+
+    return out
+
+
+def _chamfer_polyline(
+    pts: List[Vec3],
+    closed: bool,
+    distance: float,
+    indices: Optional[set[int]] = None,
+) -> List[Vec3]:
+    """
+    Chamfers / bevels sharp corners of a 3D polyline (open or closed) with flat bevels.
+    """
+    n = len(pts)
+    if n < (3 if closed else 3):
+        return [Vec3(p.x, p.y, p.z) for p in pts]
+
+    d = max(1e-5, float(distance))
+    out: List[Vec3] = []
+    start_i = 0 if closed else 1
+    end_i = n if closed else n - 1
+
+    if not closed:
+        out.append(pts[0])
+
+    for i in range(start_i, end_i):
+        p_curr = pts[i]
+        p_prev = pts[(i - 1 + n) % n]
+        p_next = pts[(i + 1) % n]
+
+        if indices is not None and i not in indices:
+            out.append(p_curr)
+            continue
+
+        v1 = p_curr - p_prev
+        v2 = p_next - p_curr
+        l1 = v1.length()
+        l2 = v2.length()
+        if l1 < 1e-6 or l2 < 1e-6:
+            out.append(p_curr)
+            continue
+
+        u1 = v1 * (1.0 / l1)
+        u2 = v2 * (1.0 / l2)
+        dot = max(-1.0, min(1.0, u1.dot(u2)))
+
+        if dot > 0.9999 or dot < -0.9999:
+            out.append(p_curr)
+            continue
+
+        t_clamped = min(d, 0.48 * l1, 0.48 * l2)
+        pa = p_curr - u1 * t_clamped
+        pb = p_curr + u2 * t_clamped
+
+        out.append(pa)
+        out.append(pb)
+
+    if not closed:
+        out.append(pts[-1])
+
+    return out
+
+
+# ============================================================================
+# Fillet Curve / Face Node
+# ============================================================================
+@register_node
+class FilletCurveNode(BaseNode):
+    type_id = "curve.fillet"
+    title = "Fillet Curve / Face"
+    category = "Curves"
+    description = (
+        "Rounds sharp corners of an open curve, closed curve, or selected face by radius.\n"
+        "Generates smooth circular arc fillets in 3D using Rodrigues rotation.\n"
+        "Preserves end-points on open polylines while filleting interior sharp corners.\n"
+        "For closed curves or faces (e.g. from Reference Face), fillets all outer corners and interior courtyard holes.\n"
+        "Input 'indices' optionally specifies vertex index or list/string of indices to fillet (e.g. [1, 2] or '1, 2'). Default fillets all corners."
+    )
+    header_color = (68, 108, 179)
+
+    inputs = [
+        InputSpec("curve", "Curve / Face", SocketType.ANY, default=None, hide_widget=True),
+        InputSpec("radius", "Radius (m)", SocketType.FLOAT, default=0.2, min_val=0.001, max_val=50.0, step=0.05),
+        InputSpec("segments", "Segments", SocketType.INT, default=4, min_val=1, max_val=32),
+        InputSpec("indices", "Corner Indices", SocketType.ANY, default="", access=AccessMode.LIST),
+    ]
+    outputs = [
+        OutputSpec("curve", "Curve", SocketType.CURVE),
+        OutputSpec("mesh", "Mesh / Face", SocketType.MESH),
+        OutputSpec("points", "Points", SocketType.VEC3),
+        OutputSpec("length", "Length (m)", SocketType.FLOAT),
+    ]
+
+    def compute(
+        self,
+        curve: Any = None,
+        radius: float = 0.2,
+        segments: int = 4,
+        indices: Any = "",
+    ) -> Dict[str, Any]:
+        idx_set = _parse_index_set(indices)
+        r = max(1e-4, float(radius))
+        seg = max(1, min(32, int(segments)))
+
+        # 1. MeshData input (from Reference Face or 2D polygon)
+        if isinstance(curve, MeshData) or (isinstance(curve, dict) and ("outer" in curve or "faces" in curve)):
+            outer_raw = curve.outer if isinstance(curve, MeshData) else curve.get("outer", [])
+            holes_raw = curve.holes if isinstance(curve, MeshData) else curve.get("holes", [])
+
+            if outer_raw:
+                outer_pts = [Vec3(float(p[0]), float(p[1]), float(p[2])) for p in outer_raw]
+                filleted_outer = _fillet_polyline(outer_pts, closed=True, radius=r, segments=seg, indices=idx_set)
+                filleted_outer_tuples = [(p.x, p.y, p.z) for p in filleted_outer]
+
+                filleted_holes_tuples: List[List[Tuple[float, float, float]]] = []
+                for h_loop in (holes_raw or []):
+                    h_pts = [Vec3(float(p[0]), float(p[1]), float(p[2])) for p in h_loop]
+                    f_h = _fillet_polyline(h_pts, closed=True, radius=r, segments=seg, indices=idx_set)
+                    if len(f_h) >= 3:
+                        filleted_holes_tuples.append([(p.x, p.y, p.z) for p in f_h])
+
+                f_mesh = MeshData(
+                    outer=filleted_outer_tuples,
+                    holes=filleted_holes_tuples,
+                    name=getattr(curve, "name", "FilletedFace"),
+                    color=getattr(curve, "color", (0.55, 0.78, 0.92)),
+                    opacity=getattr(curve, "opacity", 1.0),
+                )
+                f_curve = CurveData(points=filleted_outer, closed=True)
+                return {
+                    "curve": f_curve,
+                    "mesh": f_mesh,
+                    "points": filleted_outer,
+                    "length": f_curve.length(),
+                }
+            elif isinstance(curve, MeshData) and curve.faces:
+                # Multi-face or single-face planar mesh: extract perimeter curve
+                perim = curve.perimeter_as_curve()
+                f_pts = _fillet_polyline(perim.points, closed=perim.closed, radius=r, segments=seg, indices=idx_set)
+                f_curve = CurveData(points=f_pts, closed=perim.closed)
+                f_mesh = f_curve.to_mesh_face(f"{curve.name}_Fillet") if f_curve.closed else f_curve.to_wire_mesh()
+                return {
+                    "curve": f_curve,
+                    "mesh": f_mesh,
+                    "points": f_pts,
+                    "length": f_curve.length(),
+                }
+
+        # 2. CurveData input
+        if isinstance(curve, CurveData) and curve.points:
+            f_pts = _fillet_polyline(curve.points, closed=curve.closed, radius=r, segments=seg, indices=idx_set)
+            f_curve = CurveData(points=f_pts, closed=curve.closed)
+            f_mesh = f_curve.to_mesh_face("FilletedFace") if f_curve.closed else f_curve.to_wire_mesh("FilletedWire")
+            return {
+                "curve": f_curve,
+                "mesh": f_mesh,
+                "points": f_pts,
+                "length": f_curve.length(),
+            }
+
+        # 3. Default fallback: Open L-shape curve with sharp 90-degree corner
+        default_pts = [Vec3(0.0, 4.0, 0.0), Vec3(0.0, 0.0, 0.0), Vec3(4.0, 0.0, 0.0)]
+        f_pts = _fillet_polyline(default_pts, closed=False, radius=r, segments=seg, indices=idx_set)
+        f_curve = CurveData(points=f_pts, closed=False)
+        return {
+            "curve": f_curve,
+            "mesh": f_curve.to_wire_mesh("FilletedCurve"),
+            "points": f_pts,
+            "length": f_curve.length(),
+        }
+
+
+# ============================================================================
+# Chamfer Curve / Face Node
+# ============================================================================
+@register_node
+class ChamferCurveNode(BaseNode):
+    type_id = "curve.chamfer"
+    title = "Chamfer Curve / Face"
+    category = "Curves"
+    description = (
+        "Bevels sharp corners of an open curve, closed curve, or selected face by cutting back a specified distance.\n"
+        "Generates clean straight chamfer edges in 3D.\n"
+        "Preserves end-points on open polylines while chamfering interior sharp corners.\n"
+        "For closed curves or faces (e.g. from Reference Face), chamfers all outer corners and interior courtyard holes.\n"
+        "Input 'indices' optionally specifies vertex index or list/string of indices to chamfer (e.g. [1, 2] or '1, 2'). Default chamfers all corners."
+    )
+    header_color = (68, 108, 179)
+
+    inputs = [
+        InputSpec("curve", "Curve / Face", SocketType.ANY, default=None, hide_widget=True),
+        InputSpec("distance", "Distance (m)", SocketType.FLOAT, default=0.2, min_val=0.001, max_val=50.0, step=0.05),
+        InputSpec("indices", "Corner Indices", SocketType.ANY, default="", access=AccessMode.LIST),
+    ]
+    outputs = [
+        OutputSpec("curve", "Curve", SocketType.CURVE),
+        OutputSpec("mesh", "Mesh / Face", SocketType.MESH),
+        OutputSpec("points", "Points", SocketType.VEC3),
+        OutputSpec("length", "Length (m)", SocketType.FLOAT),
+    ]
+
+    def compute(
+        self,
+        curve: Any = None,
+        distance: float = 0.2,
+        indices: Any = "",
+    ) -> Dict[str, Any]:
+        idx_set = _parse_index_set(indices)
+        d = max(1e-4, float(distance))
+
+        # 1. MeshData input
+        if isinstance(curve, MeshData) or (isinstance(curve, dict) and ("outer" in curve or "faces" in curve)):
+            outer_raw = curve.outer if isinstance(curve, MeshData) else curve.get("outer", [])
+            holes_raw = curve.holes if isinstance(curve, MeshData) else curve.get("holes", [])
+
+            if outer_raw:
+                outer_pts = [Vec3(float(p[0]), float(p[1]), float(p[2])) for p in outer_raw]
+                chamfered_outer = _chamfer_polyline(outer_pts, closed=True, distance=d, indices=idx_set)
+                chamfered_outer_tuples = [(p.x, p.y, p.z) for p in chamfered_outer]
+
+                chamfered_holes_tuples: List[List[Tuple[float, float, float]]] = []
+                for h_loop in (holes_raw or []):
+                    h_pts = [Vec3(float(p[0]), float(p[1]), float(p[2])) for p in h_loop]
+                    c_h = _chamfer_polyline(h_pts, closed=True, distance=d, indices=idx_set)
+                    if len(c_h) >= 3:
+                        chamfered_holes_tuples.append([(p.x, p.y, p.z) for p in c_h])
+
+                c_mesh = MeshData(
+                    outer=chamfered_outer_tuples,
+                    holes=chamfered_holes_tuples,
+                    name=getattr(curve, "name", "ChamferedFace"),
+                    color=getattr(curve, "color", (0.55, 0.78, 0.92)),
+                    opacity=getattr(curve, "opacity", 1.0),
+                )
+                c_curve = CurveData(points=chamfered_outer, closed=True)
+                return {
+                    "curve": c_curve,
+                    "mesh": c_mesh,
+                    "points": chamfered_outer,
+                    "length": c_curve.length(),
+                }
+            elif isinstance(curve, MeshData) and curve.faces:
+                perim = curve.perimeter_as_curve()
+                c_pts = _chamfer_polyline(perim.points, closed=perim.closed, distance=d, indices=idx_set)
+                c_curve = CurveData(points=c_pts, closed=perim.closed)
+                c_mesh = c_curve.to_mesh_face(f"{curve.name}_Chamfer") if c_curve.closed else c_curve.to_wire_mesh()
+                return {
+                    "curve": c_curve,
+                    "mesh": c_mesh,
+                    "points": c_pts,
+                    "length": c_curve.length(),
+                }
+
+        # 2. CurveData input
+        if isinstance(curve, CurveData) and curve.points:
+            c_pts = _chamfer_polyline(curve.points, closed=curve.closed, distance=d, indices=idx_set)
+            c_curve = CurveData(points=c_pts, closed=curve.closed)
+            c_mesh = c_curve.to_mesh_face("ChamferedFace") if c_curve.closed else c_curve.to_wire_mesh("ChamferedWire")
+            return {
+                "curve": c_curve,
+                "mesh": c_mesh,
+                "points": c_pts,
+                "length": c_curve.length(),
+            }
+
+        # 3. Default fallback: Open L-shape curve
+        default_pts = [Vec3(0.0, 4.0, 0.0), Vec3(0.0, 0.0, 0.0), Vec3(4.0, 0.0, 0.0)]
+        c_pts = _chamfer_polyline(default_pts, closed=False, distance=d, indices=idx_set)
+        c_curve = CurveData(points=c_pts, closed=False)
+        return {
+            "curve": c_curve,
+            "mesh": c_curve.to_wire_mesh("ChamferedCurve"),
+            "points": c_pts,
+            "length": c_curve.length(),
+        }
+
+
+# Register backward compatibility aliases
+NODE_REGISTRY["curve.fillet"] = FilletCurveNode
+NODE_REGISTRY["curve.chamfer"] = ChamferCurveNode

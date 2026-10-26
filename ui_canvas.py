@@ -1854,7 +1854,7 @@ class NodeItem(QGraphicsItem):
 
                     sc.trigger_eval()
 
-        elif act in ("set_face", "set_curve"):
+        elif act in ("set_face", "set_curve", "set_solid"):
 
             app = self._get_app_handle()
 
@@ -1872,7 +1872,7 @@ class NodeItem(QGraphicsItem):
 
                 self._update_action_buttons()
 
-        elif act in ("sync_face", "sync_curve", "refresh_from_scene"):
+        elif act in ("sync_face", "sync_curve", "sync_solid", "refresh_from_scene"):
 
             app = self._get_app_handle()
 
@@ -1890,7 +1890,7 @@ class NodeItem(QGraphicsItem):
 
                 self._update_action_buttons()
 
-        elif act in ("clear_face", "clear_curve"):
+        elif act in ("clear_face", "clear_curve", "clear_solid"):
 
             if hasattr(self.node, "clear_reference"):
 

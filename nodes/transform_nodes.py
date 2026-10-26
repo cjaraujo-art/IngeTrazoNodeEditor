@@ -1316,3 +1316,258 @@ class TransformMirrorNode(BaseNode):
         }
 
 NODE_REGISTRY["transform.mirror"] = TransformMirrorNode
+
+
+# ============================================================================
+# Fillet & Chamfer Solid Helper
+# ============================================================================
+def _parse_index_set(indices_val: Any) -> Optional[set[int]]:
+    """Parses int, list/tuple/set of ints, or comma-separated string into a set of integers."""
+    if indices_val is None or indices_val == "":
+        return None
+    if isinstance(indices_val, (int, float)):
+        return {int(indices_val)}
+    if isinstance(indices_val, (list, tuple, set)):
+        res = set()
+        for x in indices_val:
+            if isinstance(x, (int, float)):
+                res.add(int(x))
+            elif isinstance(x, str) and (x.strip().isdigit() or (x.strip().startswith("-") and x.strip()[1:].isdigit())):
+                res.add(int(x.strip()))
+        return res if res else None
+    if isinstance(indices_val, str):
+        s = indices_val.strip()
+        if not s or s.lower() in ("all", "none", "*"):
+            return None
+        parts = s.replace(";", ",").split(",")
+        res = set()
+        for p in parts:
+            p = p.strip()
+            if p and (p.isdigit() or (p.startswith("-") and p[1:].isdigit())):
+                res.add(int(p))
+        return res if res else None
+    return None
+
+
+# ============================================================================
+# Fillet Solid Node
+# ============================================================================
+@register_node
+class FilletSolidNode(BaseNode):
+    type_id = "solid.fillet"
+    title = "Fillet Solid"
+    category = "3D Solids"
+    description = (
+        "Rounds sharp edges of a 3D solid or mesh with circular arc fillets.\n"
+        "Connect a solid mesh (from Select Solid, Box, Extrude, etc.) and specify the fillet radius.\n"
+        "Accepts an optional list or string of edge indices to fillet (e.g. from 'Select Solid' indices or '0, 1, 4').\n"
+        "If indices are omitted, all sharp edges of the solid are filleted."
+    )
+    header_color = (155, 89, 182)
+
+    inputs = [
+        InputSpec("solid", "Solid Mesh", SocketType.MESH, default=None, hide_widget=True),
+        InputSpec("radius", "Radius (m)", SocketType.FLOAT, default=0.2, min_val=0.001, max_val=20.0, step=0.02),
+        InputSpec("segments", "Segments", SocketType.INT, default=4, min_val=1, max_val=16),
+        InputSpec("indices", "Edge Indices", SocketType.ANY, default="", access=AccessMode.LIST),
+    ]
+    outputs = [
+        OutputSpec("solid", "Solid", SocketType.MESH),
+        OutputSpec("mesh", "Mesh", SocketType.MESH),
+        OutputSpec("edges", "Edges", SocketType.ANY),
+        OutputSpec("wireframe", "Wireframe", SocketType.MESH),
+        OutputSpec("indices", "Edge Indices", SocketType.ANY),
+        OutputSpec("edge_count", "Edge Count", SocketType.INT),
+    ]
+
+    def compute(
+        self,
+        solid: Any = None,
+        radius: float = 0.2,
+        segments: int = 4,
+        indices: Any = "",
+    ) -> Dict[str, Any]:
+        target_solid = solid
+        if not isinstance(target_solid, MeshData):
+            target_solid = MeshData.create_box(origin=Vec3(0, 0, 0), dx=2.0, dy=2.0, dz=2.0)
+            target_solid.name = "DefaultBox"
+
+        native_mesh = target_solid.to_native_mesh()
+        if native_mesh is None or not getattr(native_mesh, "edges", None):
+            edges_curves = target_solid.extract_edges_as_curves()
+            wireframe = target_solid.extract_wireframe_mesh()
+            return {
+                "solid": target_solid,
+                "mesh": target_solid,
+                "edges": edges_curves,
+                "wireframe": wireframe,
+                "indices": list(range(len(target_solid.edges))),
+                "edge_count": len(target_solid.edges),
+            }
+
+        try:
+            from core.fillet import plan_fillet, apply_fillet
+        except ImportError:
+            edges_curves = target_solid.extract_edges_as_curves()
+            wireframe = target_solid.extract_wireframe_mesh()
+            return {
+                "solid": target_solid,
+                "mesh": target_solid,
+                "edges": edges_curves,
+                "wireframe": wireframe,
+                "indices": list(range(len(target_solid.edges))),
+                "edge_count": len(target_solid.edges),
+            }
+
+        idx_set = _parse_index_set(indices)
+        all_edges = list(native_mesh.edges)
+        if idx_set is not None:
+            chosen_edges = [all_edges[i] for i in idx_set if 0 <= i < len(all_edges)]
+        else:
+            chosen_edges = all_edges
+
+        if chosen_edges:
+            try:
+                plan = plan_fillet(
+                    native_mesh,
+                    chosen_edges,
+                    radius=max(0.001, float(radius)),
+                    segments=max(1, min(16, int(segments))),
+                    profile=0.5,
+                )
+                if plan:
+                    apply_fillet(native_mesh, plan)
+            except Exception:
+                pass
+
+        result_solid = MeshData.from_native_mesh(native_mesh, name=f"{target_solid.name}_Fillet")
+        result_solid.color = target_solid.color
+        result_solid.material_name = target_solid.material_name
+        result_solid.opacity = target_solid.opacity
+        edges_curves = result_solid.extract_edges_as_curves()
+        wireframe = result_solid.extract_wireframe_mesh(name=f"{result_solid.name}_Wireframe")
+        out_indices = list(range(len(result_solid.edges)))
+
+        return {
+            "solid": result_solid,
+            "mesh": result_solid,
+            "edges": edges_curves,
+            "wireframe": wireframe,
+            "indices": out_indices,
+            "edge_count": len(result_solid.edges),
+        }
+
+
+# ============================================================================
+# Chamfer Solid Node
+# ============================================================================
+@register_node
+class ChamferSolidNode(BaseNode):
+    type_id = "solid.chamfer"
+    title = "Chamfer Solid"
+    category = "3D Solids"
+    description = (
+        "Bevels / chamfers sharp edges of a 3D solid or mesh with flat bevels.\n"
+        "Connect a solid mesh (from Select Solid, Box, Extrude, etc.) and specify the chamfer distance.\n"
+        "Accepts an optional list or string of edge indices to chamfer (e.g. from 'Select Solid' indices or '0, 1, 4').\n"
+        "If indices are omitted, all sharp edges of the solid are chamfered."
+    )
+    header_color = (155, 89, 182)
+
+    inputs = [
+        InputSpec("solid", "Solid Mesh", SocketType.MESH, default=None, hide_widget=True),
+        InputSpec("distance", "Distance (m)", SocketType.FLOAT, default=0.2, min_val=0.001, max_val=20.0, step=0.02),
+        InputSpec("indices", "Edge Indices", SocketType.ANY, default="", access=AccessMode.LIST),
+    ]
+    outputs = [
+        OutputSpec("solid", "Solid", SocketType.MESH),
+        OutputSpec("mesh", "Mesh", SocketType.MESH),
+        OutputSpec("edges", "Edges", SocketType.ANY),
+        OutputSpec("wireframe", "Wireframe", SocketType.MESH),
+        OutputSpec("indices", "Edge Indices", SocketType.ANY),
+        OutputSpec("edge_count", "Edge Count", SocketType.INT),
+    ]
+
+    def compute(
+        self,
+        solid: Any = None,
+        distance: float = 0.2,
+        indices: Any = "",
+    ) -> Dict[str, Any]:
+        target_solid = solid
+        if not isinstance(target_solid, MeshData):
+            target_solid = MeshData.create_box(origin=Vec3(0, 0, 0), dx=2.0, dy=2.0, dz=2.0)
+            target_solid.name = "DefaultBox"
+
+        native_mesh = target_solid.to_native_mesh()
+        if native_mesh is None or not getattr(native_mesh, "edges", None):
+            edges_curves = target_solid.extract_edges_as_curves()
+            wireframe = target_solid.extract_wireframe_mesh()
+            return {
+                "solid": target_solid,
+                "mesh": target_solid,
+                "edges": edges_curves,
+                "wireframe": wireframe,
+                "indices": list(range(len(target_solid.edges))),
+                "edge_count": len(target_solid.edges),
+            }
+
+        try:
+            from core.fillet import plan_fillet, apply_fillet
+        except ImportError:
+            edges_curves = target_solid.extract_edges_as_curves()
+            wireframe = target_solid.extract_wireframe_mesh()
+            return {
+                "solid": target_solid,
+                "mesh": target_solid,
+                "edges": edges_curves,
+                "wireframe": wireframe,
+                "indices": list(range(len(target_solid.edges))),
+                "edge_count": len(target_solid.edges),
+            }
+
+        idx_set = _parse_index_set(indices)
+        all_edges = list(native_mesh.edges)
+        if idx_set is not None:
+            chosen_edges = [all_edges[i] for i in idx_set if 0 <= i < len(all_edges)]
+        else:
+            chosen_edges = all_edges
+
+        if chosen_edges:
+            try:
+                plan = plan_fillet(
+                    native_mesh,
+                    chosen_edges,
+                    radius=max(0.001, float(distance)),
+                    segments=1,
+                    profile=0.25,
+                )
+                if plan:
+                    apply_fillet(native_mesh, plan)
+            except Exception:
+                pass
+
+        result_solid = MeshData.from_native_mesh(native_mesh, name=f"{target_solid.name}_Chamfer")
+        result_solid.color = target_solid.color
+        result_solid.material_name = target_solid.material_name
+        result_solid.opacity = target_solid.opacity
+        edges_curves = result_solid.extract_edges_as_curves()
+        wireframe = result_solid.extract_wireframe_mesh(name=f"{result_solid.name}_Wireframe")
+        out_indices = list(range(len(result_solid.edges)))
+
+        return {
+            "solid": result_solid,
+            "mesh": result_solid,
+            "edges": edges_curves,
+            "wireframe": wireframe,
+            "indices": out_indices,
+            "edge_count": len(result_solid.edges),
+        }
+
+
+# Register backward compatibility aliases
+NODE_REGISTRY["solid.fillet"] = FilletSolidNode
+NODE_REGISTRY["solid.chamfer"] = ChamferSolidNode
+NODE_REGISTRY["transform.fillet"] = FilletSolidNode
+NODE_REGISTRY["transform.chamfer"] = ChamferSolidNode
+
